@@ -1,0 +1,52 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  AGENT
+  USER
+}
+
+model User {
+  id                   Int             @id @default(autoincrement())
+  email                String          @unique
+  password             String?         // Null au début lors de la création par invitation
+  name                 String
+  role                 Role            @default(USER)
+  isActive             Boolean         @default(true)
+  invitationToken      String?         @unique
+  invitationExpires    DateTime?
+  resetPasswordToken   String?         @unique
+  resetPasswordExpires DateTime?
+  refreshTokens        RefreshToken[]
+  tickets              Ticket[]        @relation("UserTickets")
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+}
+
+model RefreshToken {
+  id        Int      @id @default(autoincrement())
+  token     String   @unique
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  revoked   Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model Ticket {
+  id          Int      @id @default(autoincrement())
+  title       String
+  description String
+  status      String   @default("OPEN")
+  authorId    Int
+  author      User     @relation("UserTickets", fields: [authorId], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}

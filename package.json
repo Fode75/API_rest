@@ -1,22 +1,36 @@
 {
   "name": "hello-api",
   "version": "1.0.0",
-  "description": "API Hello World avec Node.js, TypeScript et Express",
-  "main": "dist/index.js",
+  "description": "",
+  "main": "index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "db:push": "prisma db push",
+    "db:generate": "prisma generate",
+    "db:studio": "prisma studio"
   },
   "keywords": [],
   "license": "MIT",
   "dependencies": {
-    "express": "^4.21.2"
+    "@prisma/client": "^5.22.0",
+    "bcrypt": "^6.0.0",
+    "dotenv": "^18.0.10",
+    "jsonwebtoken": "^9.0.3"
   },
   "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
     "@types/express": "^4.17.21",
-    "@types/node": "^22.10.0",
-    "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "@types/jest": "^29.5.12",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/supertest": "^6.0.2",
+    "express": "^4.19.2",
+    "jest": "^29.7.0",
+    "prisma": "^5.22.0",
+    "supertest": "^6.3.4",
+    "ts-jest": "^29.1.2",
+    "tsx": "^4.7.1",
+    "typescript": "^5.3.3"
   }
 }
