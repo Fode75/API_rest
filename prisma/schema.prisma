@@ -1,0 +1,58 @@
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  AGENT
+  USER
+}
+
+enum TokenType {
+  INVITATION
+  PASSWORD_RESET
+  REFRESH
+}
+
+model User {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  firstName    String
+  lastName     String
+  // null tant que l'invitation n'a pas été acceptée
+  passwordHash String?
+  role         Role      @default(USER)
+  isActive     Boolean   @default(true)
+  invitedById  String?
+  invitedBy    User?     @relation("Invitations", fields: [invitedById], references: [id])
+  invitees     User[]    @relation("Invitations")
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  tokens       Token[]
+
+  @@map("users")
+}
+
+// Un seul tableau pour les jetons à usage unique : invitation, reset, refresh.
+// On ne stocke JAMAIS le jeton en clair, seulement son hash SHA-256.
+model Token {
+  id        String    @id @default(uuid())
+  type      TokenType
+  tokenHash String    @unique
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, type])
+  @@map("tokens")
+}
