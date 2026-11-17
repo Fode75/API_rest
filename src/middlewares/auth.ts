@@ -17,22 +17,26 @@ export const authenticateToken = (req: AuthRequest, res: Response, next: NextFun
     return res.status(401).json({ error: "Accès refusé. Token manquant." });
   }
 
-  const secret = process.env.JWT_SECRET || 'secret_par_defaut';
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    console.error('[SECURITY ERROR] JWT_SECRET non défini dans les variables d’environnement.');
+    return res.status(500).json({ error: "Erreur de configuration du serveur." });
+  }
 
-  jwt.verify(token, secret, (err, user) => {
-    if (err) {
-      return res.status(403).json({ error: "Token invalide ou expiré." });
-    }
-    req.user = user as { userId: number; role: string };
+  try {
+    const decoded = jwt.verify(token, secret) as { userId: number; role: string };
+    req.user = decoded;
     next();
-  });
+  } catch (error) {
+    return res.status(403).json({ error: "Token invalide ou expiré." });
+  }
 };
 
-// Vérification des rôles (ex: SUPER_ADMIN, ADMIN, AGENT, USER)
+// Contrôle d'accès basé sur les rôles (RBAC)
 export const authorizeRoles = (...allowedRoles: string[]) => {
   return (req: AuthRequest, res: Response, next: NextFunction) => {
     if (!req.user || !allowedRoles.includes(req.user.role)) {
-      return res.status(403).json({ error: "Permissions insuffisantes pour accéder à cette ressource." });
+      return res.status(403).json({ error: "Accès interdit. Permissions insuffisantes." });
     }
     next();
   };

@@ -1,29 +1,27 @@
-# 🎫 Support Ticketing API
+# API REST Ticketing Sécurisée (`hello-api`)
 
-API REST robuste et sécurisée de gestion de tickets d'assistance technique, développée en **TypeScript** avec **Node.js**, **Express**, **Prisma ORM** et **PostgreSQL**.
-
----
-
-## 🚀 Stack Technique
-
-* **Langage :** TypeScript (Node.js)
-* **Framework :** Express.js
-* **Base de données :** PostgreSQL (distant)
-* **ORM :** Prisma
-* **Sécurité :** Bcrypt (hachage des mots de passe), JWT (Access Tokens & Refresh Tokens), Crypto (jetons d'invitation sécurisés)
+API REST de gestion de tickets d'assistance développée avec **Node.js**, **Express**, **TypeScript**, **Prisma ORM** et **PostgreSQL**, intégrant un audit de sécurité et des mesures de remédiation conformes au référentiel **OWASP API Security Top 10 (2023)**.
 
 ---
 
-## 📂 Architecture du Projet
+## 1. Prérequis & Installation
 
-```text
-hello-api/
-├── prisma/
-│   └── schema.prisma      # Modèle de données (User, Ticket, RefreshToken)
-├── src/
-│   ├── middlewares/
-│   │   └── auth.ts        # Middlewares d'authentification et contrôle des rôles (RBAC)
-│   └── index.ts           # Point d'entrée, routes et logique métier
-├── .env                   # Variables d'environnement (confidentiel)
-├── package.json           # Dépendances et scripts de gestion
-└── tsconfig.json          # Configuration TypeScript
+### Prérequis
+- **Node.js** (v18+ ou v22+)
+- **PostgreSQL** (local, Docker ou instance distante)
+
+### Installation
+```bash
+# 1. Cloner le dépôt et installer les dépendances
+npm install
+
+# 2. Configurer les variables d'environnement
+cp .env.example .env
+# Renseigner DATABASE_URL et JWT_SECRET dans le fichier .env
+
+# 3. Synchroniser le schéma Prisma avec la base de données
+npx prisma generate
+npx prisma db push
+
+# 4. Démarrer le serveur en mode développement
+npm run dev
