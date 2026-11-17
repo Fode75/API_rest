@@ -1,0 +1,4087 @@
+From 864aab88d6001a3875d4c09b84ccdb4b2615bc88 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fod=C3=A9?= <foffode01@gmail.com>
+Date: Tue, 17 Nov 2026 14:25:43 +0100
+Subject: [PATCH] =?UTF-8?q?feat:=20route=20/health,=20authentification=20c?=
+ =?UTF-8?q?ompl=C3=A8te=20et=20invitation=20admin=20avec=20Resend?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- structure routers / controllers / middlewares / services / utils
+- GET /health : teste la base et log l'URL (mot de passe masqué)
+- scripts Prisma dans package.json, schéma User/Token, seed du Super Admin
+- login, refresh, logout, mot de passe oublié/réinitialisation, acceptation d'invitation
+- route admin d'invitation avec e-mail de bienvenue via Resend (pas de register)
+- routes hello d'origine conservées dans helloRouter
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QpnFrjJzngaP8vroqo1Dfm
+---
+ .env.example                        |   23 +
+ .gitignore                          |    1 +
+ README.md                           |   55 +-
+ package-lock.json                   | 2333 ++++++++++++++++++++++++++-
+ package.json                        |   45 +-
+ prisma.config.ts                    |   13 +
+ prisma/schema.prisma                |   58 +
+ prisma/seed.ts                      |   39 +
+ src/app.ts                          |   24 +
+ src/controllers/authController.ts   |   48 +
+ src/controllers/healthController.ts |   23 +
+ src/controllers/userController.ts   |   19 +
+ src/index.ts                        |   18 -
+ src/middlewares/authenticate.ts     |   27 +
+ src/middlewares/authorize.ts        |   12 +
+ src/middlewares/errorHandler.ts     |   20 +
+ src/middlewares/rateLimiters.ts     |   10 +
+ src/middlewares/validate.ts         |   17 +
+ src/routers/adminRouter.ts          |   19 +
+ src/routers/authRouter.ts           |   30 +
+ src/routers/healthRouter.ts         |    9 +
+ src/routers/helloRouter.ts          |   14 +
+ src/routers/index.ts                |   11 +
+ src/server.ts                       |   32 +
+ src/services/authService.ts         |  181 +++
+ src/services/emailService.ts        |   74 +
+ src/services/userService.ts         |  130 ++
+ src/utils/AppError.ts               |   16 +
+ src/utils/asyncHandler.ts           |    9 +
+ src/utils/env.ts                    |   27 +
+ src/utils/maskDatabaseUrl.ts        |   11 +
+ src/utils/prisma.ts                 |    8 +
+ src/utils/schemas.ts                |   45 +
+ src/utils/tokens.ts                 |   31 +
+ 34 files changed, 3369 insertions(+), 63 deletions(-)
+ create mode 100644 .env.example
+ create mode 100644 prisma.config.ts
+ create mode 100644 prisma/schema.prisma
+ create mode 100644 prisma/seed.ts
+ create mode 100644 src/app.ts
+ create mode 100644 src/controllers/authController.ts
+ create mode 100644 src/controllers/healthController.ts
+ create mode 100644 src/controllers/userController.ts
+ delete mode 100644 src/index.ts
+ create mode 100644 src/middlewares/authenticate.ts
+ create mode 100644 src/middlewares/authorize.ts
+ create mode 100644 src/middlewares/errorHandler.ts
+ create mode 100644 src/middlewares/rateLimiters.ts
+ create mode 100644 src/middlewares/validate.ts
+ create mode 100644 src/routers/adminRouter.ts
+ create mode 100644 src/routers/authRouter.ts
+ create mode 100644 src/routers/healthRouter.ts
+ create mode 100644 src/routers/helloRouter.ts
+ create mode 100644 src/routers/index.ts
+ create mode 100644 src/server.ts
+ create mode 100644 src/services/authService.ts
+ create mode 100644 src/services/emailService.ts
+ create mode 100644 src/services/userService.ts
+ create mode 100644 src/utils/AppError.ts
+ create mode 100644 src/utils/asyncHandler.ts
+ create mode 100644 src/utils/env.ts
+ create mode 100644 src/utils/maskDatabaseUrl.ts
+ create mode 100644 src/utils/prisma.ts
+ create mode 100644 src/utils/schemas.ts
+ create mode 100644 src/utils/tokens.ts
+
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..3759ce4
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,23 @@
++# --- Serveur ---
++PORT=3000
++NODE_ENV=development
++# URL du front (utilisée dans les liens des e-mails)
++FRONTEND_URL=http://localhost:5173
++
++# --- Base de données ---
++DATABASE_URL="postgresql://tickets:motdepasse@localhost:5432/tickets?schema=public"
++
++# --- JWT (mets deux secrets différents, longs et aléatoires) ---
++JWT_ACCESS_SECRET=change-me-access-secret
++JWT_REFRESH_SECRET=change-me-refresh-secret
++JWT_ACCESS_EXPIRES_IN=15m
++JWT_REFRESH_EXPIRES_DAYS=7
++
++# --- Resend ---
++RESEND_API_KEY=re_xxxxxxxxxxxxxxxxx
++# En test sans domaine vérifié : onboarding@resend.dev (envoi uniquement vers ton propre e-mail)
++EMAIL_FROM="Support IT <onboarding@resend.dev>"
++
++# --- Premier Super Admin (utilisé par le seed, car il n'y a pas d'inscription) ---
++SEED_ADMIN_EMAIL=admin@example.com
++SEED_ADMIN_PASSWORD=ChangeMoi123!
+diff --git a/.gitignore b/.gitignore
+index 9c97bbd..b0a6f07 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,3 +1,4 @@
+ node_modules
+ dist
+ .env
++src/generated
+diff --git a/README.md b/README.md
+index ed3ce19..5726c93 100644
+--- a/README.md
++++ b/README.md
+@@ -1,31 +1,54 @@
+ # hello-api
+ 
+-API « Hello World » avec Node.js, TypeScript et Express.
++API REST avec Node.js, TypeScript, Express et Prisma (PostgreSQL), avec authentification
++et invitation d'utilisateurs par e-mail (Resend).
+ 
+-## Installation
++## Structure
+ 
+-```bash
+-npm install
++```
++src/
++  routers/       définition des routes
++  controllers/   lisent la requête, appellent un service, répondent
++  services/      logique métier (auth, utilisateurs, e-mails Resend)
++  middlewares/   authenticate, authorize, validate, erreurs, rate limit
++  utils/         env, prisma, jetons, erreurs, schémas de validation
++prisma/          schema.prisma et seed
+ ```
+ 
+-## Développement (rechargement automatique)
++## Installation
+ 
+ ```bash
++cp .env.example .env     # puis remplir DATABASE_URL, secrets JWT, RESEND_API_KEY
++npm install
++npm run prisma:migrate   # crée les tables (donne un nom, ex. init)
++npm run prisma:seed      # crée le premier Super Admin (pas d'inscription publique)
+ npm run dev
+ ```
+ 
+-## Production
+-
+-```bash
+-npm run build
+-npm start
+-```
++## Scripts
+ 
+-Le serveur écoute sur le port `3000` par défaut (modifiable avec la variable `PORT`).
++| Script                                                   | Rôle                                  |
++| -------------------------------------------------------- | ------------------------------------- |
++| `dev` / `build` / `start`                                | développement, compilation, production |
++| `prisma:generate`, `prisma:format`, `prisma:validate`    | client, formatage, validation du schéma |
++| `prisma:migrate`, `prisma:deploy`, `prisma:status`       | migrations (dev, prod, état)           |
++| `prisma:reset`, `prisma:push`, `prisma:studio`           | reset, push du schéma, interface web   |
++| `prisma:seed`                                            | crée le Super Admin du `.env`          |
+ 
+ ## Routes
+ 
+-| Méthode | Route          | Réponse                           |
+-| ------- | -------------- | --------------------------------- |
+-| GET     | `/`            | `{ "message": "Hello, World!" }`  |
+-| GET     | `/hello/:name` | `{ "message": "Hello, <name>!" }` |
++| Méthode | Route                              | Accès         | Rôle                                   |
++| ------- | ---------------------------------- | ------------- | -------------------------------------- |
++| GET     | `/`, `/hello/:name`                | public        | routes d'origine                       |
++| GET     | `/health`                          | public        | teste la base, log de l'URL (masquée)  |
++| POST    | `/api/auth/login`                  | public        | connexion                              |
++| POST    | `/api/auth/refresh`                | public        | nouveau couple de jetons               |
++| POST    | `/api/auth/logout`                 | public        | invalide le refresh token              |
++| POST    | `/api/auth/forgot-password`        | public        | envoie le lien de réinitialisation     |
++| POST    | `/api/auth/reset-password`         | public        | choisit un nouveau mot de passe        |
++| POST    | `/api/auth/accept-invitation`      | public        | active le compte invité                |
++| GET     | `/api/auth/me`                     | connecté      | profil                                 |
++| POST    | `/api/auth/change-password`        | connecté      | change le mot de passe                 |
++| POST    | `/api/admin/users/invite`          | Admin         | invite un utilisateur (e-mail Resend)  |
++| GET     | `/api/admin/users`                 | Admin         | liste des utilisateurs                 |
++| PATCH   | `/api/admin/users/:id/status`      | Admin         | désactive / réactive un compte         |
+diff --git a/package-lock.json b/package-lock.json
+index 7b36eb1..5c0f2a3 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -9,15 +9,61 @@
+       "version": "1.0.0",
+       "license": "MIT",
+       "dependencies": {
+-        "express": "^4.21.2"
++        "@prisma/adapter-pg": "^7.0.0",
++        "@prisma/client": "^7.0.0",
++        "bcryptjs": "^3.0.2",
++        "cors": "^2.8.5",
++        "dotenv": "^16.4.5",
++        "express": "^4.21.2",
++        "express-rate-limit": "^7.5.0",
++        "helmet": "^8.0.0",
++        "jsonwebtoken": "^9.0.2",
++        "pg": "^8.13.1",
++        "resend": "^4.0.1",
++        "zod": "^3.24.1"
+       },
+       "devDependencies": {
++        "@types/bcryptjs": "^2.4.6",
++        "@types/cors": "^2.8.17",
+         "@types/express": "^4.17.21",
++        "@types/jsonwebtoken": "^9.0.7",
+         "@types/node": "^22.10.0",
++        "@types/pg": "^8.11.10",
++        "prisma": "^7.0.0",
+         "tsx": "^4.19.2",
+         "typescript": "^5.7.2"
+       }
+     },
++    "node_modules/@electric-sql/pglite": {
++      "version": "0.4.3",
++      "resolved": "https://registry.npmjs.org/@electric-sql/pglite/-/pglite-0.4.3.tgz",
++      "integrity": "sha512-ichuWTgtd4mOM1G4SpyGJa5trT03lWbMypDV0fUXUCXg5hiHqVAz/bZyV68NqmkLB7WcYmj1RMJVSp8HV/v/ZQ==",
++      "devOptional": true,
++      "license": "Apache-2.0"
++    },
++    "node_modules/@electric-sql/pglite-socket": {
++      "version": "0.1.3",
++      "resolved": "https://registry.npmjs.org/@electric-sql/pglite-socket/-/pglite-socket-0.1.3.tgz",
++      "integrity": "sha512-LAciWM0M1dCL8hlsxu2venbVZcdxema0BtDfpWYVqr+Y468UADw0pFWidhKw1M8sfJ8rdLT71tjMmnirf/IZRQ==",
++      "devOptional": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "pglite-server": "dist/scripts/server.js"
++      },
++      "peerDependencies": {
++        "@electric-sql/pglite": "0.4.3"
++      }
++    },
++    "node_modules/@electric-sql/pglite-tools": {
++      "version": "0.3.3",
++      "resolved": "https://registry.npmjs.org/@electric-sql/pglite-tools/-/pglite-tools-0.3.3.tgz",
++      "integrity": "sha512-AlzLJTRJ8+UFgK8CmxIpyIpJ0+YaFw02IiOSdYrqxwPXdSyeIShz8aa9Tq+tYFXdPwcaMp/Fc80mQZ1dkOQ/wg==",
++      "devOptional": true,
++      "license": "Apache-2.0",
++      "peerDependencies": {
++        "@electric-sql/pglite": "0.4.3"
++      }
++    },
+     "node_modules/@esbuild/aix-ppc64": {
+       "version": "0.28.2",
+       "resolved": "https://registry.npmjs.org/@esbuild/aix-ppc64/-/aix-ppc64-0.28.2.tgz",
+@@ -460,6 +506,415 @@
+         "node": ">=18"
+       }
+     },
++    "node_modules/@prisma/adapter-pg": {
++      "version": "7.10.1",
++      "resolved": "https://registry.npmjs.org/@prisma/adapter-pg/-/adapter-pg-7.10.1.tgz",
++      "integrity": "sha512-EP9ruPYHjKP80WZlb5qVaEXKgZjJieBFjAxcBtQnDAHD6+16UN4keVmBh6L/RUpuDQT2FQRbvKNgq5d4Ix+IkQ==",
++      "license": "Apache-2.0",
++      "dependencies": {
++        "@prisma/driver-adapter-utils": "7.10.1",
++        "@types/pg": "^8.16.0",
++        "pg": "^8.16.3",
++        "postgres-array": "3.0.4"
++      }
++    },
++    "node_modules/@prisma/client": {
++      "version": "7.10.1",
++      "resolved": "https://registry.npmjs.org/@prisma/client/-/client-7.10.1.tgz",
++      "integrity": "sha512-5tgAbFGh//zVOC6WPNVgziOErJHYkUE+wmqCwbIyq6IrTXUYtv9y2iBFGh/Owo99Mx0+cr0j1FOrxkYBMuyhaQ==",
++      "license": "Apache-2.0",
++      "dependencies": {
++        "@prisma/client-runtime-utils": "7.10.1"
++      },
++      "engines": {
++        "node": "^20.19 || ^22.12 || >=24.0"
++      },
++      "peerDependencies": {
++        "prisma": "*",
++        "typescript": ">=5.4.0"
++      },
++      "peerDependenciesMeta": {
++        "prisma": {
++          "optional": true
++        },
++        "typescript": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@prisma/client-runtime-utils": {
++      "version": "7.10.1",
++      "resolved": "https://registry.npmjs.org/@prisma/client-runtime-utils/-/client-runtime-utils-7.10.1.tgz",
++      "integrity": "sha512-AzoATVIgmO3lcZfM443+9SI7+cyLMW2+Psw4op8WQHpHvHCX//CKxv8fwhiL0yGWF8DjdQrFewxrZo5McBdB8g==",
++      "license": "Apache-2.0"
++    },
++    "node_modules/@prisma/config": {
++      "version": "7.10.1",
++      "resolved": "https://registry.npmjs.org/@prisma/config/-/config-7.10.1.tgz",
++      "integrity": "sha512-+0swF5ELUa3P/9cIR26+gpYjjCbGE0qvEBZhV4zMDkYsrtHjZ884MQbOnWFWXj600N0sSJNnHbtBqe12yDngWg==",
++      "devOptional": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "c12": "3.3.4",
++        "deepmerge-ts": "8.0.2",
++        "effect": "3.20.0",
++        "empathic": "2.0.0"
++      }
++    },
++    "node_modules/@prisma/debug": {
++      "version": "7.10.1",
++      "resolved": "https://registry.npmjs.org/@prisma/debug/-/debug-7.10.1.tgz",
++      "integrity": "sha512-eFCAkGZ13D/qPg48JBlG5IWi9cSBBOC7oG3abDPcAkYioDWlIjh0YJJLK2J7qo5S+xWWD8I6egAN/8KbCaiMCA==",
++      "license": "Apache-2.0"
++    },
++    "node_modules/@prisma/dev": {
++      "version": "0.24.17",
++      "resolved": "https://registry.npmjs.org/@prisma/dev/-/dev-0.24.17.tgz",
++      "integrity": "sha512-UvdZzmpFwknnfreh6Jije84ekkYGPYEJhXG1tFzCsCfQyzJifrOo38eZc0qajzvaC6OLUOrN9ML5XfCnEZL9DA==",
++      "devOptional": true,
++      "license": "ISC",
++      "dependencies": {
++        "@electric-sql/pglite": "0.4.3",
++        "@electric-sql/pglite-socket": "0.1.3",
++        "@electric-sql/pglite-tools": "0.3.3",
++        "@prisma/get-platform": "7.2.0",
++        "@prisma/query-plan-executor": "7.2.0",
++        "@prisma/streams-local": "0.1.11",
++        "find-my-way": "9.7.0",
++        "foreground-child": "3.3.1",
++        "get-port-please": "3.2.0",
++        "pathe": "2.0.3",
++        "proper-lockfile": "4.1.2",
++        "remeda": "2.33.4",
++        "std-env": "3.10.0",
++        "valibot": "1.4.2",
++        "zeptomatch": "2.1.0"
++      }
++    },
++    "node_modules/@prisma/driver-adapter-utils": {
++      "version": "7.10.1",
++      "resolved": "https://registry.npmjs.org/@prisma/driver-adapter-utils/-/driver-adapter-utils-7.10.1.tgz",
++      "integrity": "sha512-DJ4c6xvVnm3s9ZUyql9nCUicADSqyvH+CjXRCM9L6m5zJxCNmebCElG6X4irICq3rosBwlX+S19Dxq/4IrZk3A==",
++      "license": "Apache-2.0",
++      "dependencies": {
++        "@prisma/debug": "7.10.1"
++      }
++    },
++    "node_modules/@prisma/engines": {
++      "version": "7.10.1",
++      "resolved": "https://registry.npmjs.org/@prisma/engines/-/engines-7.10.1.tgz",
++      "integrity": "sha512-R6/ghv1Bu36FhCdQLFof1pNtyoWoeDzJLYeTKjgqb4eGtOAJx7ZqJtcm4pzkahLfZ9rYz8AkmsMDwkyiYbXPCQ==",
++      "devOptional": true,
++      "hasInstallScript": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "@prisma/debug": "7.10.1",
++        "@prisma/engines-version": "8.1.0-1.d1b3f377ca835d73fd50954a5e22128b9ebdd6b8",
++        "@prisma/fetch-engine": "7.10.1",
++        "@prisma/get-platform": "7.10.1"
++      }
++    },
++    "node_modules/@prisma/engines-version": {
++      "version": "8.1.0-1.d1b3f377ca835d73fd50954a5e22128b9ebdd6b8",
++      "resolved": "https://registry.npmjs.org/@prisma/engines-version/-/engines-version-8.1.0-1.d1b3f377ca835d73fd50954a5e22128b9ebdd6b8.tgz",
++      "integrity": "sha512-XjXmwjN2NE340RpXoXv8ZF8aNAvr0FE+7gNfkKeW6vyjXs7F8uxvEbWQoVrhioXDQoIsnNmv7r+wxvzfdEZaWA==",
++      "devOptional": true,
++      "license": "Apache-2.0"
++    },
++    "node_modules/@prisma/engines/node_modules/@prisma/get-platform": {
++      "version": "7.10.1",
++      "resolved": "https://registry.npmjs.org/@prisma/get-platform/-/get-platform-7.10.1.tgz",
++      "integrity": "sha512-iVnghHne5vcaobBjPVCMEjh5r/1UCj394EIGTUclasFRatpR/MQwcM2veLv5kgoFSyYP54nch/lNFCQRYcDxvg==",
++      "devOptional": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "@prisma/debug": "7.10.1"
++      }
++    },
++    "node_modules/@prisma/fetch-engine": {
++      "version": "7.10.1",
++      "resolved": "https://registry.npmjs.org/@prisma/fetch-engine/-/fetch-engine-7.10.1.tgz",
++      "integrity": "sha512-qZezeaExLWG2ptbHOrMxdiWluKHgqEclTdJbvY6pk6+Wg7EiVkeq5U3cXz9ti8nd0bngNvsDgledLHVRg5LF1w==",
++      "devOptional": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "@prisma/debug": "7.10.1",
++        "@prisma/engines-version": "8.1.0-1.d1b3f377ca835d73fd50954a5e22128b9ebdd6b8",
++        "@prisma/get-platform": "7.10.1"
++      }
++    },
++    "node_modules/@prisma/fetch-engine/node_modules/@prisma/get-platform": {
++      "version": "7.10.1",
++      "resolved": "https://registry.npmjs.org/@prisma/get-platform/-/get-platform-7.10.1.tgz",
++      "integrity": "sha512-iVnghHne5vcaobBjPVCMEjh5r/1UCj394EIGTUclasFRatpR/MQwcM2veLv5kgoFSyYP54nch/lNFCQRYcDxvg==",
++      "devOptional": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "@prisma/debug": "7.10.1"
++      }
++    },
++    "node_modules/@prisma/get-platform": {
++      "version": "7.2.0",
++      "resolved": "https://registry.npmjs.org/@prisma/get-platform/-/get-platform-7.2.0.tgz",
++      "integrity": "sha512-k1V0l0Td1732EHpAfi2eySTezyllok9dXb6UQanajkJQzPUGi3vO2z7jdkz67SypFTdmbnyGYxvEvYZdZsMAVA==",
++      "devOptional": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "@prisma/debug": "7.2.0"
++      }
++    },
++    "node_modules/@prisma/get-platform/node_modules/@prisma/debug": {
++      "version": "7.2.0",
++      "resolved": "https://registry.npmjs.org/@prisma/debug/-/debug-7.2.0.tgz",
++      "integrity": "sha512-YSGTiSlBAVJPzX4ONZmMotL+ozJwQjRmZweQNIq/ER0tQJKJynNkRB3kyvt37eOfsbMCXk3gnLF6J9OJ4QWftw==",
++      "devOptional": true,
++      "license": "Apache-2.0"
++    },
++    "node_modules/@prisma/query-plan-executor": {
++      "version": "7.2.0",
++      "resolved": "https://registry.npmjs.org/@prisma/query-plan-executor/-/query-plan-executor-7.2.0.tgz",
++      "integrity": "sha512-EOZmNzcV8uJ0mae3DhTsiHgoNCuu1J9mULQpGCh62zN3PxPTd+qI9tJvk5jOst8WHKQNwJWR3b39t0XvfBB0WQ==",
++      "devOptional": true,
++      "license": "Apache-2.0"
++    },
++    "node_modules/@prisma/streams-local": {
++      "version": "0.1.11",
++      "resolved": "https://registry.npmjs.org/@prisma/streams-local/-/streams-local-0.1.11.tgz",
++      "integrity": "sha512-0TcebL559MByKqTJ+SsrFIEg228iw8UCVRFckzgfRSiJqczhs+MuAgWOF9lnOIV/IVqvu+KMnFTH0eDeTQMpUg==",
++      "devOptional": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "ajv": "^8.12.0",
++        "better-result": "^2.7.0",
++        "env-paths": "^3.0.0",
++        "proper-lockfile": "^4.1.2"
++      },
++      "engines": {
++        "bun": ">=1.2.0",
++        "node": ">=22.0.0"
++      }
++    },
++    "node_modules/@prisma/studio-core": {
++      "version": "0.33.0",
++      "resolved": "https://registry.npmjs.org/@prisma/studio-core/-/studio-core-0.33.0.tgz",
++      "integrity": "sha512-V2fX/nKEymNTrHXwfP26PGjoLStO35Ogu+ex7CFJbLrMYEcZxxZpiSNOs7px23Hk5mzLWvM5RsqG6Ka+rha+wg==",
++      "devOptional": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "@radix-ui/react-toggle": "1.1.10",
++        "@visx/curve": "4.0.1-alpha.0",
++        "@visx/event": "4.0.1-alpha.0",
++        "@visx/grid": "4.0.1-alpha.0",
++        "@visx/group": "4.0.1-alpha.0",
++        "@visx/responsive": "4.0.1-alpha.0",
++        "@visx/scale": "4.0.1-alpha.0",
++        "@visx/shape": "4.0.1-alpha.0",
++        "d3-array": "3.2.4",
++        "d3-shape": "3.2.0",
++        "elkjs": "0.11.1"
++      },
++      "engines": {
++        "node": "^20.19 || ^22.12 || >=24.0",
++        "pnpm": "8"
++      },
++      "peerDependencies": {
++        "@types/react": "^18.0.0 || ^19.0.0",
++        "react": "^18.0.0 || ^19.0.0",
++        "react-dom": "^18.0.0 || ^19.0.0"
++      }
++    },
++    "node_modules/@radix-ui/primitive": {
++      "version": "1.1.3",
++      "resolved": "https://registry.npmjs.org/@radix-ui/primitive/-/primitive-1.1.3.tgz",
++      "integrity": "sha512-JTF99U/6XIjCBo0wqkU5sK10glYe27MRRsfwoiq5zzOEZLHU3A3KCMa5X/azekYRCJ0HlwI0crAXS/5dEHTzDg==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/@radix-ui/react-compose-refs": {
++      "version": "1.1.2",
++      "resolved": "https://registry.npmjs.org/@radix-ui/react-compose-refs/-/react-compose-refs-1.1.2.tgz",
++      "integrity": "sha512-z4eqJvfiNnFMHIIvXP3CY57y2WJs5g2v3X0zm9mEJkrkNv4rDxu+sg9Jh8EkXyeqBkB7SOcboo9dMVqhyrACIg==",
++      "devOptional": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "*",
++        "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@radix-ui/react-primitive": {
++      "version": "2.1.3",
++      "resolved": "https://registry.npmjs.org/@radix-ui/react-primitive/-/react-primitive-2.1.3.tgz",
++      "integrity": "sha512-m9gTwRkhy2lvCPe6QJp4d3G1TYEUHn/FzJUtq9MjH46an1wJU+GdoGC5VLof8RX8Ft/DlpshApkhswDLZzHIcQ==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "@radix-ui/react-slot": "1.2.3"
++      },
++      "peerDependencies": {
++        "@types/react": "*",
++        "@types/react-dom": "*",
++        "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc",
++        "react-dom": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        },
++        "@types/react-dom": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@radix-ui/react-slot": {
++      "version": "1.2.3",
++      "resolved": "https://registry.npmjs.org/@radix-ui/react-slot/-/react-slot-1.2.3.tgz",
++      "integrity": "sha512-aeNmHnBxbi2St0au6VBVC7JXFlhLlOnvIIlePNniyUNAClzmtAUEY8/pBiK3iHjufOlwA+c20/8jngo7xcrg8A==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "@radix-ui/react-compose-refs": "1.1.2"
++      },
++      "peerDependencies": {
++        "@types/react": "*",
++        "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@radix-ui/react-toggle": {
++      "version": "1.1.10",
++      "resolved": "https://registry.npmjs.org/@radix-ui/react-toggle/-/react-toggle-1.1.10.tgz",
++      "integrity": "sha512-lS1odchhFTeZv3xwHH31YPObmJn8gOg7Lq12inrr0+BH/l3Tsq32VfjqH1oh80ARM3mlkfMic15n0kg4sD1poQ==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "@radix-ui/primitive": "1.1.3",
++        "@radix-ui/react-primitive": "2.1.3",
++        "@radix-ui/react-use-controllable-state": "1.2.2"
++      },
++      "peerDependencies": {
++        "@types/react": "*",
++        "@types/react-dom": "*",
++        "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc",
++        "react-dom": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        },
++        "@types/react-dom": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@radix-ui/react-use-controllable-state": {
++      "version": "1.2.2",
++      "resolved": "https://registry.npmjs.org/@radix-ui/react-use-controllable-state/-/react-use-controllable-state-1.2.2.tgz",
++      "integrity": "sha512-BjasUjixPFdS+NKkypcyyN5Pmg83Olst0+c6vGov0diwTEo6mgdqVR6hxcEgFuh4QrAs7Rc+9KuGJ9TVCj0Zzg==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "@radix-ui/react-use-effect-event": "0.0.2",
++        "@radix-ui/react-use-layout-effect": "1.1.1"
++      },
++      "peerDependencies": {
++        "@types/react": "*",
++        "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@radix-ui/react-use-effect-event": {
++      "version": "0.0.2",
++      "resolved": "https://registry.npmjs.org/@radix-ui/react-use-effect-event/-/react-use-effect-event-0.0.2.tgz",
++      "integrity": "sha512-Qp8WbZOBe+blgpuUT+lw2xheLP8q0oatc9UpmiemEICxGvFLYmHm9QowVZGHtJlGbS6A6yJ3iViad/2cVjnOiA==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "@radix-ui/react-use-layout-effect": "1.1.1"
++      },
++      "peerDependencies": {
++        "@types/react": "*",
++        "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@radix-ui/react-use-layout-effect": {
++      "version": "1.1.1",
++      "resolved": "https://registry.npmjs.org/@radix-ui/react-use-layout-effect/-/react-use-layout-effect-1.1.1.tgz",
++      "integrity": "sha512-RbJRS4UWQFkzHTTwVymMTUv8EqYhOp8dOOviLj2ugtTiXRaRQS7GLGxZTLL1jWhMeoSCf5zmcZkqTl9IiYfXcQ==",
++      "devOptional": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "*",
++        "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc"
++      },
++      "peerDependenciesMeta": {
++        "@types/react": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@react-email/render": {
++      "version": "1.1.2",
++      "resolved": "https://registry.npmjs.org/@react-email/render/-/render-1.1.2.tgz",
++      "integrity": "sha512-RnRehYN3v9gVlNMehHPHhyp2RQo7+pSkHDtXPvg3s0GbzM9SQMW4Qrf8GRNvtpLC4gsI+Wt0VatNRUFqjvevbw==",
++      "license": "MIT",
++      "dependencies": {
++        "html-to-text": "^9.0.5",
++        "prettier": "^3.5.3",
++        "react-promise-suspense": "^0.3.4"
++      },
++      "engines": {
++        "node": ">=18.0.0"
++      },
++      "peerDependencies": {
++        "react": "^18.0 || ^19.0 || ^19.0.0-rc",
++        "react-dom": "^18.0 || ^19.0 || ^19.0.0-rc"
++      }
++    },
++    "node_modules/@selderee/plugin-htmlparser2": {
++      "version": "0.11.0",
++      "resolved": "https://registry.npmjs.org/@selderee/plugin-htmlparser2/-/plugin-htmlparser2-0.11.0.tgz",
++      "integrity": "sha512-P33hHGdldxGabLFjPPpaTxVolMrzrcegejx+0GxjrIb9Zv48D8yAIA/QTDR2dFl7Uz7urX8aX6+5bCZslr+gWQ==",
++      "license": "MIT",
++      "dependencies": {
++        "domhandler": "^5.0.3",
++        "selderee": "^0.11.0"
++      },
++      "funding": {
++        "url": "https://ko-fi.com/killymxi"
++      }
++    },
++    "node_modules/@standard-schema/spec": {
++      "version": "1.1.0",
++      "resolved": "https://registry.npmjs.org/@standard-schema/spec/-/spec-1.1.0.tgz",
++      "integrity": "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/@types/bcryptjs": {
++      "version": "2.4.6",
++      "resolved": "https://registry.npmjs.org/@types/bcryptjs/-/bcryptjs-2.4.6.tgz",
++      "integrity": "sha512-9xlo6R2qDs5uixm0bcIqCeMCE6HiQsIyel9KQySStiyqNl2tnj2mP3DX1Nf56MD6KMenNNlBBsy3LJ7gUEQPXQ==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/@types/body-parser": {
+       "version": "1.19.6",
+       "resolved": "https://registry.npmjs.org/@types/body-parser/-/body-parser-1.19.6.tgz",
+@@ -481,6 +936,105 @@
+         "@types/node": "*"
+       }
+     },
++    "node_modules/@types/cors": {
++      "version": "2.8.19",
++      "resolved": "https://registry.npmjs.org/@types/cors/-/cors-2.8.19.tgz",
++      "integrity": "sha512-mFNylyeyqN93lfe/9CSxOGREz8cpzAhH+E93xJ4xWQf62V8sQ/24reV2nyzUWM6H6Xji+GGHpkbLe7pVoUEskg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@types/node": "*"
++      }
++    },
++    "node_modules/@types/d3-array": {
++      "version": "3.0.3",
++      "resolved": "https://registry.npmjs.org/@types/d3-array/-/d3-array-3.0.3.tgz",
++      "integrity": "sha512-Reoy+pKnvsksN0lQUlcH6dOGjRZ/3WRwXR//m+/8lt1BXeI4xyaUZoqULNjyXXRuh0Mj4LNpkCvhUpQlY3X5xQ==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/@types/d3-color": {
++      "version": "3.1.0",
++      "resolved": "https://registry.npmjs.org/@types/d3-color/-/d3-color-3.1.0.tgz",
++      "integrity": "sha512-HKuicPHJuvPgCD+np6Se9MQvS6OCbJmOjGvylzMJRlDwUXjKTTXs6Pwgk79O09Vj/ho3u1ofXnhFOaEWWPrlwA==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/@types/d3-delaunay": {
++      "version": "6.0.1",
++      "resolved": "https://registry.npmjs.org/@types/d3-delaunay/-/d3-delaunay-6.0.1.tgz",
++      "integrity": "sha512-tLxQ2sfT0p6sxdG75c6f/ekqxjyYR0+LwPrsO1mbC9YDBzPJhs2HbJJRrn8Ez1DBoHRo2yx7YEATI+8V1nGMnQ==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/@types/d3-format": {
++      "version": "3.0.1",
++      "resolved": "https://registry.npmjs.org/@types/d3-format/-/d3-format-3.0.1.tgz",
++      "integrity": "sha512-5KY70ifCCzorkLuIkDe0Z9YTf9RR2CjBX1iaJG+rgM/cPP+sO+q9YdQ9WdhQcgPj1EQiJ2/0+yUkkziTG6Lubg==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/@types/d3-geo": {
++      "version": "3.1.0",
++      "resolved": "https://registry.npmjs.org/@types/d3-geo/-/d3-geo-3.1.0.tgz",
++      "integrity": "sha512-856sckF0oP/diXtS4jNsiQw/UuK5fQG8l/a9VVLeSouf1/PPbBE1i1W852zVwKwYCBkFJJB7nCFTbk6UMEXBOQ==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "@types/geojson": "*"
++      }
++    },
++    "node_modules/@types/d3-interpolate": {
++      "version": "3.0.1",
++      "resolved": "https://registry.npmjs.org/@types/d3-interpolate/-/d3-interpolate-3.0.1.tgz",
++      "integrity": "sha512-jx5leotSeac3jr0RePOH1KdR9rISG91QIE4Q2PYTu4OymLTZfA3SrnURSLzKH48HmXVUru50b8nje4E79oQSQw==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "@types/d3-color": "*"
++      }
++    },
++    "node_modules/@types/d3-path": {
++      "version": "3.1.1",
++      "resolved": "https://registry.npmjs.org/@types/d3-path/-/d3-path-3.1.1.tgz",
++      "integrity": "sha512-VMZBYyQvbGmWyWVea0EHs/BwLgxc+MKi1zLDCONksozI4YJMcTt8ZEuIR4Sb1MMTE8MMW49v0IwI5+b7RmfWlg==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/@types/d3-scale": {
++      "version": "4.0.2",
++      "resolved": "https://registry.npmjs.org/@types/d3-scale/-/d3-scale-4.0.2.tgz",
++      "integrity": "sha512-Yk4htunhPAwN0XGlIwArRomOjdoBFXC3+kCxK2Ubg7I9shQlVSJy/pG/Ht5ASN+gdMIalpk8TJ5xV74jFsetLA==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "@types/d3-time": "*"
++      }
++    },
++    "node_modules/@types/d3-shape": {
++      "version": "3.1.7",
++      "resolved": "https://registry.npmjs.org/@types/d3-shape/-/d3-shape-3.1.7.tgz",
++      "integrity": "sha512-VLvUQ33C+3J+8p+Daf+nYSOsjB4GXp19/S/aGo60m9h1v6XaxjiT82lKVWJCfzhtuZ3yD7i/TPeC/fuKLLOSmg==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "@types/d3-path": "*"
++      }
++    },
++    "node_modules/@types/d3-time": {
++      "version": "3.0.0",
++      "resolved": "https://registry.npmjs.org/@types/d3-time/-/d3-time-3.0.0.tgz",
++      "integrity": "sha512-sZLCdHvBUcNby1cB6Fd3ZBrABbjz3v1Vm90nysCQ6Vt7vd6e/h9Lt7SiJUoEX0l4Dzc7P5llKyhqSi1ycSf1Hg==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/@types/d3-time-format": {
++      "version": "2.1.0",
++      "resolved": "https://registry.npmjs.org/@types/d3-time-format/-/d3-time-format-2.1.0.tgz",
++      "integrity": "sha512-/myT3I7EwlukNOX2xVdMzb8FRgNzRMpsZddwst9Ld/VFe6LyJyRp0s32l/V9XoUzk+Gqu56F/oGk6507+8BxrA==",
++      "devOptional": true,
++      "license": "MIT"
++    },
+     "node_modules/@types/express": {
+       "version": "4.17.25",
+       "resolved": "https://registry.npmjs.org/@types/express/-/express-4.17.25.tgz",
+@@ -507,6 +1061,13 @@
+         "@types/send": "*"
+       }
+     },
++    "node_modules/@types/geojson": {
++      "version": "7946.0.16",
++      "resolved": "https://registry.npmjs.org/@types/geojson/-/geojson-7946.0.16.tgz",
++      "integrity": "sha512-6C8nqWur3j98U6+lXDfTUWIfgvZU+EumvpHKcYjujKH7woYyLj2sUmff0tRhrqM7BohUw7Pz3ZB1jj2gW9Fvmg==",
++      "devOptional": true,
++      "license": "MIT"
++    },
+     "node_modules/@types/http-errors": {
+       "version": "2.0.5",
+       "resolved": "https://registry.npmjs.org/@types/http-errors/-/http-errors-2.0.5.tgz",
+@@ -514,6 +1075,24 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@types/jsonwebtoken": {
++      "version": "9.0.10",
++      "resolved": "https://registry.npmjs.org/@types/jsonwebtoken/-/jsonwebtoken-9.0.10.tgz",
++      "integrity": "sha512-asx5hIG9Qmf/1oStypjanR7iKTv0gXQ1Ov/jfrX6kS/EO0OFni8orbmGCn0672NHR3kXHwpAwR+B368ZGN/2rA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@types/ms": "*",
++        "@types/node": "*"
++      }
++    },
++    "node_modules/@types/lodash": {
++      "version": "4.17.27",
++      "resolved": "https://registry.npmjs.org/@types/lodash/-/lodash-4.17.27.tgz",
++      "integrity": "sha512-VenMRv/eKNrspX9v3H4dbmjsrnCOYdYBG3kxXKk3dG6X+urBGcj2Prww3xw1U5K4FV/mE4h5GbWd0szEKf+9ew==",
++      "devOptional": true,
++      "license": "MIT"
++    },
+     "node_modules/@types/mime": {
+       "version": "1.3.5",
+       "resolved": "https://registry.npmjs.org/@types/mime/-/mime-1.3.5.tgz",
+@@ -521,16 +1100,33 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@types/ms": {
++      "version": "2.1.0",
++      "resolved": "https://registry.npmjs.org/@types/ms/-/ms-2.1.0.tgz",
++      "integrity": "sha512-GsCCIZDE/p3i96vtEqx+7dBUGXrc7zeSK3wwPHIaRThS+9OhWIXRqzs4d6k1SVU8g91DrNRWxWUGhp5KXQb2VA==",
++      "dev": true,
++      "license": "MIT"
++    },
+     "node_modules/@types/node": {
+       "version": "22.20.5",
+       "resolved": "https://registry.npmjs.org/@types/node/-/node-22.20.5.tgz",
+       "integrity": "sha512-U2+DNr+wSjpsTS/wZGYHq7GcwfuSmKiKvoPvK22zwTlRhU91yOniN4qRR5KhIjvif7ysw/dz/hKmfDH0Ris4aA==",
+-      "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "undici-types": "~6.21.0"
+       }
+     },
++    "node_modules/@types/pg": {
++      "version": "8.23.1",
++      "resolved": "https://registry.npmjs.org/@types/pg/-/pg-8.23.1.tgz",
++      "integrity": "sha512-fKVHpikPdg4GKks3JuLEhvwSyvwzF23hnabPy6DD8ljVbC7+6J5dQzdv4arV6jqq57djnMgs1HKBxX4P8aBI3A==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/node": "*",
++        "pg-protocol": "*",
++        "pg-types": "^2.2.0"
++      }
++    },
+     "node_modules/@types/qs": {
+       "version": "6.15.1",
+       "resolved": "https://registry.npmjs.org/@types/qs/-/qs-6.15.1.tgz",
+@@ -545,6 +1141,16 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@types/react": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
++      "integrity": "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "csstype": "^3.2.2"
++      }
++    },
+     "node_modules/@types/send": {
+       "version": "1.2.1",
+       "resolved": "https://registry.npmjs.org/@types/send/-/send-1.2.1.tgz",
+@@ -578,6 +1184,157 @@
+         "@types/node": "*"
+       }
+     },
++    "node_modules/@visx/curve": {
++      "version": "4.0.1-alpha.0",
++      "resolved": "https://registry.npmjs.org/@visx/curve/-/curve-4.0.1-alpha.0.tgz",
++      "integrity": "sha512-jRu61Uz274pV1zyioXmboyrLutYbnKsgjj4njSGCnhdXj5GkZvZbg+ThDb6oOzoAnJOBRLz4rzPlWvNJOzuVMg==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "@visx/vendor": "4.0.0-alpha.0"
++      }
++    },
++    "node_modules/@visx/event": {
++      "version": "4.0.1-alpha.0",
++      "resolved": "https://registry.npmjs.org/@visx/event/-/event-4.0.1-alpha.0.tgz",
++      "integrity": "sha512-EQqCMSv/s8NbFjo+hz3FKsvvYfP+2QslsFJ/24/O5l/W+7UC6J6aAvO0ujVwrTwdYbuQ+vhxKi1xdPdKR/qj1g==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "@types/react": "*",
++        "@visx/point": "4.0.1-alpha.0"
++      }
++    },
++    "node_modules/@visx/grid": {
++      "version": "4.0.1-alpha.0",
++      "resolved": "https://registry.npmjs.org/@visx/grid/-/grid-4.0.1-alpha.0.tgz",
++      "integrity": "sha512-rycutGmTHO+znNdPumheWMglm7YfpffvRwUkVy5zy4WoORIuKTMkDxwnOzHG2xMxU3EE/YCd37xFV5AxA30yeg==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "@types/react": "*",
++        "@visx/curve": "4.0.1-alpha.0",
++        "@visx/group": "4.0.1-alpha.0",
++        "@visx/point": "4.0.1-alpha.0",
++        "@visx/scale": "4.0.1-alpha.0",
++        "@visx/shape": "4.0.1-alpha.0",
++        "classnames": "^2.3.1"
++      },
++      "peerDependencies": {
++        "react": "^16.14.0 || ^17.0.0-0 || ^18.0.0-0 || ^19.0.0-0"
++      }
++    },
++    "node_modules/@visx/group": {
++      "version": "4.0.1-alpha.0",
++      "resolved": "https://registry.npmjs.org/@visx/group/-/group-4.0.1-alpha.0.tgz",
++      "integrity": "sha512-V19l7iQ7jccBv8kao/EByuI6o4xtxzzLV9nqVI1hRvmdzTVsuLpqlwzYCZUXJaTVvUWf8s4D2SQFjGkj/Nw+0w==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "@types/react": "*",
++        "classnames": "^2.3.1"
++      },
++      "peerDependencies": {
++        "react": "^16.14.0 || ^17.0.0-0 || ^18.0.0-0 || ^19.0.0-0"
++      }
++    },
++    "node_modules/@visx/point": {
++      "version": "4.0.1-alpha.0",
++      "resolved": "https://registry.npmjs.org/@visx/point/-/point-4.0.1-alpha.0.tgz",
++      "integrity": "sha512-ijTfr/Nx09f03vIj9nyTr3z4Xth4Y75427UaogJh6dnIRLMEFHQOwNu791sbfiNj0a+ZXuaE32h0vKrFe4/8Qg==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/@visx/responsive": {
++      "version": "4.0.1-alpha.0",
++      "resolved": "https://registry.npmjs.org/@visx/responsive/-/responsive-4.0.1-alpha.0.tgz",
++      "integrity": "sha512-o+1zGywQZY0+yOx3Iw87wc4bbPJRr/HnIukTwfOz4UVyj9pB1OQNVHB7OORO1+LBHJceWpB31co/ZV9KHncKrA==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "@types/lodash": "^4.17.13",
++        "@types/react": "*",
++        "lodash": "^4.17.21"
++      },
++      "peerDependencies": {
++        "react": "^16.14.0 || ^17.0.0-0 || ^18.0.0-0 || ^19.0.0-0"
++      }
++    },
++    "node_modules/@visx/scale": {
++      "version": "4.0.1-alpha.0",
++      "resolved": "https://registry.npmjs.org/@visx/scale/-/scale-4.0.1-alpha.0.tgz",
++      "integrity": "sha512-nzjeE87vFSAXGWFiiNfBpNLAf0Q8Qmf6syvKLjqNi4kGZkdhbUll3E/59YsgWXmjM8+llPLWzGsP+JPvo5eq1A==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "@visx/vendor": "4.0.0-alpha.0"
++      }
++    },
++    "node_modules/@visx/shape": {
++      "version": "4.0.1-alpha.0",
++      "resolved": "https://registry.npmjs.org/@visx/shape/-/shape-4.0.1-alpha.0.tgz",
++      "integrity": "sha512-62QeiVNmPlterQGwhkEDcbq7M0MqY0lBsK5QKXtM9ZoPZWkuGV3aykA3+Xu20B2FAvyJq4LqJzBc7Sxr+EAdbA==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "@types/lodash": "^4.17.13",
++        "@types/react": "*",
++        "@visx/curve": "4.0.1-alpha.0",
++        "@visx/group": "4.0.1-alpha.0",
++        "@visx/scale": "4.0.1-alpha.0",
++        "@visx/vendor": "4.0.0-alpha.0",
++        "classnames": "^2.3.1",
++        "lodash": "^4.17.21"
++      },
++      "peerDependencies": {
++        "react": "^16.14.0 || ^17.0.0-0 || ^18.0.0-0 || ^19.0.0-0"
++      }
++    },
++    "node_modules/@visx/vendor": {
++      "version": "4.0.0-alpha.0",
++      "resolved": "https://registry.npmjs.org/@visx/vendor/-/vendor-4.0.0-alpha.0.tgz",
++      "integrity": "sha512-6I+MuqXBcv9jnlcVowHoHKSdk9gXTWkHLKyqBwRWg7LY6A3Ei8SHfubpqGV5rBUSppxMq2RszPJUS6w+H0YgmQ==",
++      "devOptional": true,
++      "license": "MIT and ISC",
++      "dependencies": {
++        "@types/d3-array": "3.0.3",
++        "@types/d3-color": "3.1.0",
++        "@types/d3-delaunay": "6.0.1",
++        "@types/d3-format": "3.0.1",
++        "@types/d3-geo": "3.1.0",
++        "@types/d3-interpolate": "3.0.1",
++        "@types/d3-path": "3.1.1",
++        "@types/d3-scale": "4.0.2",
++        "@types/d3-shape": "3.1.7",
++        "@types/d3-time": "3.0.0",
++        "@types/d3-time-format": "2.1.0",
++        "d3-array": "3.2.1",
++        "d3-color": "3.1.0",
++        "d3-delaunay": "6.0.2",
++        "d3-format": "3.1.0",
++        "d3-geo": "3.1.0",
++        "d3-interpolate": "3.0.1",
++        "d3-path": "3.1.0",
++        "d3-scale": "4.0.2",
++        "d3-shape": "3.2.0",
++        "d3-time": "3.1.0",
++        "d3-time-format": "4.1.0",
++        "internmap": "2.0.3"
++      }
++    },
++    "node_modules/@visx/vendor/node_modules/d3-array": {
++      "version": "3.2.1",
++      "resolved": "https://registry.npmjs.org/d3-array/-/d3-array-3.2.1.tgz",
++      "integrity": "sha512-gUY/qeHq/yNqqoCKNq4vtpFLdoCdvyNpWoC/KNjhGbhDuQpAM9sIQQKkXSNpXa9h5KySs/gzm7R88WkUutgwWQ==",
++      "devOptional": true,
++      "license": "ISC",
++      "dependencies": {
++        "internmap": "1 - 2"
++      },
++      "engines": {
++        "node": ">=12"
++      }
++    },
+     "node_modules/accepts": {
+       "version": "1.3.8",
+       "resolved": "https://registry.npmjs.org/accepts/-/accepts-1.3.8.tgz",
+@@ -591,12 +1348,55 @@
+         "node": ">= 0.6"
+       }
+     },
++    "node_modules/ajv": {
++      "version": "8.20.0",
++      "resolved": "https://registry.npmjs.org/ajv/-/ajv-8.20.0.tgz",
++      "integrity": "sha512-Thbli+OlOj+iMPYFBVBfJ3OmCAnaSyNn4M1vz9T6Gka5Jt9ba/HIR56joy65tY6kx/FCF5VXNB819Y7/GUrBGA==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "fast-deep-equal": "^3.1.3",
++        "fast-uri": "^3.0.1",
++        "json-schema-traverse": "^1.0.0",
++        "require-from-string": "^2.0.2"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/epoberezkin"
++      }
++    },
+     "node_modules/array-flatten": {
+       "version": "1.1.1",
+       "resolved": "https://registry.npmjs.org/array-flatten/-/array-flatten-1.1.1.tgz",
+       "integrity": "sha512-PCVAQswWemu6UdxsDFFX/+gVeYqKAod3D3UVm91jHwynguOwAvYPhx8nNlM++NqRcK6CxxpUafjmhIdKiHibqg==",
+       "license": "MIT"
+     },
++    "node_modules/aws-ssl-profiles": {
++      "version": "1.1.2",
++      "resolved": "https://registry.npmjs.org/aws-ssl-profiles/-/aws-ssl-profiles-1.1.2.tgz",
++      "integrity": "sha512-NZKeq9AfyQvEeNlN0zSYAaWrmBffJh3IELMZfRpJVWgrpEbtEpnjvzqBPf+mxoI287JohRDoa+/nsfqqiZmF6g==",
++      "devOptional": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 6.0.0"
++      }
++    },
++    "node_modules/bcryptjs": {
++      "version": "3.0.3",
++      "resolved": "https://registry.npmjs.org/bcryptjs/-/bcryptjs-3.0.3.tgz",
++      "integrity": "sha512-GlF5wPWnSa/X5LKM1o0wz0suXIINz1iHRLvTS+sLyi7XPbe5ycmYI3DlZqVGZZtDgl4DmasFg7gOB3JYbphV5g==",
++      "license": "BSD-3-Clause",
++      "bin": {
++        "bcrypt": "bin/bcrypt"
++      }
++    },
++    "node_modules/better-result": {
++      "version": "2.10.0",
++      "resolved": "https://registry.npmjs.org/better-result/-/better-result-2.10.0.tgz",
++      "integrity": "sha512-oQhh0y1qo2/ZKdAAEvHZAqKKiHOFU5k/bW96fE2ScgQOVkJRiHwB+nOS1SgFsYqRlxMDWvefXi9Q3px7QvgNDw==",
++      "devOptional": true,
++      "license": "MIT"
++    },
+     "node_modules/body-parser": {
+       "version": "1.20.9",
+       "resolved": "https://registry.npmjs.org/body-parser/-/body-parser-1.20.9.tgz",
+@@ -621,6 +1421,12 @@
+         "npm": "1.2.8000 || >= 1.4.16"
+       }
+     },
++    "node_modules/buffer-equal-constant-time": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/buffer-equal-constant-time/-/buffer-equal-constant-time-1.0.1.tgz",
++      "integrity": "sha512-zRpUiDwd/xk6ADqPMATG8vc9VPrkck7T07OIx0gnjmJAnHnTVXNQG3vfvWNuiZIkwu9KrKdA1iJKfsfTVxE6NA==",
++      "license": "BSD-3-Clause"
++    },
+     "node_modules/bytes": {
+       "version": "3.1.2",
+       "resolved": "https://registry.npmjs.org/bytes/-/bytes-3.1.2.tgz",
+@@ -630,10 +1436,52 @@
+         "node": ">= 0.8"
+       }
+     },
+-    "node_modules/call-bind-apply-helpers": {
+-      "version": "1.0.2",
+-      "resolved": "https://registry.npmjs.org/call-bind-apply-helpers/-/call-bind-apply-helpers-1.0.2.tgz",
+-      "integrity": "sha512-Sp1ablJ0ivDkSzjcaJdxEunN5/XvksFJ2sMBFfq6x0ryhQV/2b/KwFe21cMpmHtPOSij8K99/wSfoEuTObmuMQ==",
++    "node_modules/c12": {
++      "version": "3.3.4",
++      "resolved": "https://registry.npmjs.org/c12/-/c12-3.3.4.tgz",
++      "integrity": "sha512-cM0ApFQSBXuourJejzwv/AuPRvAxordTyParRVcHjjtXirtkzM0uK2L9TTn9s0cXZbG7E55jCivRQzoxYmRAlA==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "chokidar": "^5.0.0",
++        "confbox": "^0.2.4",
++        "defu": "^6.1.6",
++        "dotenv": "^17.3.1",
++        "exsolve": "^1.0.8",
++        "giget": "^3.2.0",
++        "jiti": "^2.6.1",
++        "ohash": "^2.0.11",
++        "pathe": "^2.0.3",
++        "perfect-debounce": "^2.1.0",
++        "pkg-types": "^2.3.0",
++        "rc9": "^3.0.1"
++      },
++      "peerDependencies": {
++        "magicast": "*"
++      },
++      "peerDependenciesMeta": {
++        "magicast": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/c12/node_modules/dotenv": {
++      "version": "17.4.2",
++      "resolved": "https://registry.npmjs.org/dotenv/-/dotenv-17.4.2.tgz",
++      "integrity": "sha512-nI4U3TottKAcAD9LLud4Cb7b2QztQMUEfHbvhTH09bqXTxnSie8WnjPALV/WMCrJZ6UV/qHJ6L03OqO3LcdYZw==",
++      "devOptional": true,
++      "license": "BSD-2-Clause",
++      "engines": {
++        "node": ">=12"
++      },
++      "funding": {
++        "url": "https://dotenvx.com"
++      }
++    },
++    "node_modules/call-bind-apply-helpers": {
++      "version": "1.0.2",
++      "resolved": "https://registry.npmjs.org/call-bind-apply-helpers/-/call-bind-apply-helpers-1.0.2.tgz",
++      "integrity": "sha512-Sp1ablJ0ivDkSzjcaJdxEunN5/XvksFJ2sMBFfq6x0ryhQV/2b/KwFe21cMpmHtPOSij8K99/wSfoEuTObmuMQ==",
+       "license": "MIT",
+       "dependencies": {
+         "es-errors": "^1.3.0",
+@@ -659,6 +1507,36 @@
+         "url": "https://github.com/sponsors/ljharb"
+       }
+     },
++    "node_modules/chokidar": {
++      "version": "5.0.0",
++      "resolved": "https://registry.npmjs.org/chokidar/-/chokidar-5.0.0.tgz",
++      "integrity": "sha512-TQMmc3w+5AxjpL8iIiwebF73dRDF4fBIieAqGn9RGCWaEVwQ6Fb2cGe31Yns0RRIzii5goJ1Y7xbMwo1TxMplw==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "readdirp": "^5.0.0"
++      },
++      "engines": {
++        "node": ">= 20.19.0"
++      },
++      "funding": {
++        "url": "https://paulmillr.com/funding/"
++      }
++    },
++    "node_modules/classnames": {
++      "version": "2.5.1",
++      "resolved": "https://registry.npmjs.org/classnames/-/classnames-2.5.1.tgz",
++      "integrity": "sha512-saHYOzhIQs6wy2sVxTM6bUDsQO4F50V9RQ22qBpEdCW+I+/Wmke2HOl6lS6dTpdxVhb88/I6+Hs+438c3lfUow==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/confbox": {
++      "version": "0.2.4",
++      "resolved": "https://registry.npmjs.org/confbox/-/confbox-0.2.4.tgz",
++      "integrity": "sha512-ysOGlgTFbN2/Y6Cg3Iye8YKulHw+R2fNXHrgSmXISQdMnomY6eNDprVdW9R5xBguEqI954+S6709UyiO7B+6OQ==",
++      "devOptional": true,
++      "license": "MIT"
++    },
+     "node_modules/content-disposition": {
+       "version": "0.5.4",
+       "resolved": "https://registry.npmjs.org/content-disposition/-/content-disposition-0.5.4.tgz",
+@@ -695,6 +1573,183 @@
+       "integrity": "sha512-NXdYc3dLr47pBkpUCHtKSwIOQXLVn8dZEuywboCOJY/osA0wFSLlSawr3KN8qXJEyX66FcONTH8EIlVuK0yyFA==",
+       "license": "MIT"
+     },
++    "node_modules/cors": {
++      "version": "2.8.6",
++      "resolved": "https://registry.npmjs.org/cors/-/cors-2.8.6.tgz",
++      "integrity": "sha512-tJtZBBHA6vjIAaF6EnIaq6laBBP9aq/Y3ouVJjEfoHbRBcHBAHYcMh/w8LDrk2PvIMMq8gmopa5D4V8RmbrxGw==",
++      "license": "MIT",
++      "dependencies": {
++        "object-assign": "^4",
++        "vary": "^1"
++      },
++      "engines": {
++        "node": ">= 0.10"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/express"
++      }
++    },
++    "node_modules/cross-spawn": {
++      "version": "7.0.6",
++      "resolved": "https://registry.npmjs.org/cross-spawn/-/cross-spawn-7.0.6.tgz",
++      "integrity": "sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "path-key": "^3.1.0",
++        "shebang-command": "^2.0.0",
++        "which": "^2.0.1"
++      },
++      "engines": {
++        "node": ">= 8"
++      }
++    },
++    "node_modules/csstype": {
++      "version": "3.2.4",
++      "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.4.tgz",
++      "integrity": "sha512-PoKaoPzQapnEoqUSnHx1u6W6ku8CVEgKsnpmmzU3m1nwkidpPBQ8V/Zq2+bWNrsOKoKLwTGdbx6xF7BXP1zLVQ==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/d3-array": {
++      "version": "3.2.4",
++      "resolved": "https://registry.npmjs.org/d3-array/-/d3-array-3.2.4.tgz",
++      "integrity": "sha512-tdQAmyA18i4J7wprpYq8ClcxZy3SC31QMeByyCFyRt7BVHdREQZ5lpzoe5mFEYZUWe+oq8HBvk9JjpibyEV4Jg==",
++      "devOptional": true,
++      "license": "ISC",
++      "dependencies": {
++        "internmap": "1 - 2"
++      },
++      "engines": {
++        "node": ">=12"
++      }
++    },
++    "node_modules/d3-color": {
++      "version": "3.1.0",
++      "resolved": "https://registry.npmjs.org/d3-color/-/d3-color-3.1.0.tgz",
++      "integrity": "sha512-zg/chbXyeBtMQ1LbD/WSoW2DpC3I0mpmPdW+ynRTj/x2DAWYrIY7qeZIHidozwV24m4iavr15lNwIwLxRmOxhA==",
++      "devOptional": true,
++      "license": "ISC",
++      "engines": {
++        "node": ">=12"
++      }
++    },
++    "node_modules/d3-delaunay": {
++      "version": "6.0.2",
++      "resolved": "https://registry.npmjs.org/d3-delaunay/-/d3-delaunay-6.0.2.tgz",
++      "integrity": "sha512-IMLNldruDQScrcfT+MWnazhHbDJhcRJyOEBAJfwQnHle1RPh6WDuLvxNArUju2VSMSUuKlY5BGHRJ2cYyoFLQQ==",
++      "devOptional": true,
++      "license": "ISC",
++      "dependencies": {
++        "delaunator": "5"
++      },
++      "engines": {
++        "node": ">=12"
++      }
++    },
++    "node_modules/d3-format": {
++      "version": "3.1.0",
++      "resolved": "https://registry.npmjs.org/d3-format/-/d3-format-3.1.0.tgz",
++      "integrity": "sha512-YyUI6AEuY/Wpt8KWLgZHsIU86atmikuoOmCfommt0LYHiQSPjvX2AcFc38PX0CBpr2RCyZhjex+NS/LPOv6YqA==",
++      "devOptional": true,
++      "license": "ISC",
++      "engines": {
++        "node": ">=12"
++      }
++    },
++    "node_modules/d3-geo": {
++      "version": "3.1.0",
++      "resolved": "https://registry.npmjs.org/d3-geo/-/d3-geo-3.1.0.tgz",
++      "integrity": "sha512-JEo5HxXDdDYXCaWdwLRt79y7giK8SbhZJbFWXqbRTolCHFI5jRqteLzCsq51NKbUoX0PjBVSohxrx+NoOUujYA==",
++      "devOptional": true,
++      "license": "ISC",
++      "dependencies": {
++        "d3-array": "2.5.0 - 3"
++      },
++      "engines": {
++        "node": ">=12"
++      }
++    },
++    "node_modules/d3-interpolate": {
++      "version": "3.0.1",
++      "resolved": "https://registry.npmjs.org/d3-interpolate/-/d3-interpolate-3.0.1.tgz",
++      "integrity": "sha512-3bYs1rOD33uo8aqJfKP3JWPAibgw8Zm2+L9vBKEHJ2Rg+viTR7o5Mmv5mZcieN+FRYaAOWX5SJATX6k1PWz72g==",
++      "devOptional": true,
++      "license": "ISC",
++      "dependencies": {
++        "d3-color": "1 - 3"
++      },
++      "engines": {
++        "node": ">=12"
++      }
++    },
++    "node_modules/d3-path": {
++      "version": "3.1.0",
++      "resolved": "https://registry.npmjs.org/d3-path/-/d3-path-3.1.0.tgz",
++      "integrity": "sha512-p3KP5HCf/bvjBSSKuXid6Zqijx7wIfNW+J/maPs+iwR35at5JCbLUT0LzF1cnjbCHWhqzQTIN2Jpe8pRebIEFQ==",
++      "devOptional": true,
++      "license": "ISC",
++      "engines": {
++        "node": ">=12"
++      }
++    },
++    "node_modules/d3-scale": {
++      "version": "4.0.2",
++      "resolved": "https://registry.npmjs.org/d3-scale/-/d3-scale-4.0.2.tgz",
++      "integrity": "sha512-GZW464g1SH7ag3Y7hXjf8RoUuAFIqklOAq3MRl4OaWabTFJY9PN/E1YklhXLh+OQ3fM9yS2nOkCoS+WLZ6kvxQ==",
++      "devOptional": true,
++      "license": "ISC",
++      "dependencies": {
++        "d3-array": "2.10.0 - 3",
++        "d3-format": "1 - 3",
++        "d3-interpolate": "1.2.0 - 3",
++        "d3-time": "2.1.1 - 3",
++        "d3-time-format": "2 - 4"
++      },
++      "engines": {
++        "node": ">=12"
++      }
++    },
++    "node_modules/d3-shape": {
++      "version": "3.2.0",
++      "resolved": "https://registry.npmjs.org/d3-shape/-/d3-shape-3.2.0.tgz",
++      "integrity": "sha512-SaLBuwGm3MOViRq2ABk3eLoxwZELpH6zhl3FbAoJ7Vm1gofKx6El1Ib5z23NUEhF9AsGl7y+dzLe5Cw2AArGTA==",
++      "devOptional": true,
++      "license": "ISC",
++      "dependencies": {
++        "d3-path": "^3.1.0"
++      },
++      "engines": {
++        "node": ">=12"
++      }
++    },
++    "node_modules/d3-time": {
++      "version": "3.1.0",
++      "resolved": "https://registry.npmjs.org/d3-time/-/d3-time-3.1.0.tgz",
++      "integrity": "sha512-VqKjzBLejbSMT4IgbmVgDjpkYrNWUYJnbCGo874u7MMKIWsILRX+OpX/gTk8MqjpT1A/c6HY2dCA77ZN0lkQ2Q==",
++      "devOptional": true,
++      "license": "ISC",
++      "dependencies": {
++        "d3-array": "2 - 3"
++      },
++      "engines": {
++        "node": ">=12"
++      }
++    },
++    "node_modules/d3-time-format": {
++      "version": "4.1.0",
++      "resolved": "https://registry.npmjs.org/d3-time-format/-/d3-time-format-4.1.0.tgz",
++      "integrity": "sha512-dJxPBlzC7NugB2PDLwo9Q8JiTR3M3e4/XANkreKSUxF8vvXKqm1Yfq4Q5dl8budlunRVlUUaDUgFt7eA8D6NLg==",
++      "devOptional": true,
++      "license": "ISC",
++      "dependencies": {
++        "d3-time": "1 - 3"
++      },
++      "engines": {
++        "node": ">=12"
++      }
++    },
+     "node_modules/debug": {
+       "version": "2.6.9",
+       "resolved": "https://registry.npmjs.org/debug/-/debug-2.6.9.tgz",
+@@ -704,6 +1759,52 @@
+         "ms": "2.0.0"
+       }
+     },
++    "node_modules/deepmerge": {
++      "version": "4.3.1",
++      "resolved": "https://registry.npmjs.org/deepmerge/-/deepmerge-4.3.1.tgz",
++      "integrity": "sha512-3sUqbMEc77XqpdNO7FRyRog+eW3ph+GYCbj+rK+uYyRMuwsVy0rMiVtPn+QJlKFvWP/1PYpapqYn0Me2knFn+A==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=0.10.0"
++      }
++    },
++    "node_modules/deepmerge-ts": {
++      "version": "8.0.2",
++      "resolved": "https://registry.npmjs.org/deepmerge-ts/-/deepmerge-ts-8.0.2.tgz",
++      "integrity": "sha512-uqbvqLUMrc6p0MO+WBRtTxY55hmyh94WRwI5a++PZe54X+bfVh59FSN7uWCBCW1CCVjzjnrwzfI8zidE2obMMw==",
++      "devOptional": true,
++      "funding": [
++        {
++          "type": "ko-fi",
++          "url": "https://ko-fi.com/rebeccastevens"
++        },
++        {
++          "type": "tidelift",
++          "url": "https://tidelift.com/funding/github/npm/deepmerge-ts"
++        }
++      ],
++      "license": "BSD-3-Clause",
++      "engines": {
++        "node": ">=16.9.0"
++      }
++    },
++    "node_modules/defu": {
++      "version": "6.1.7",
++      "resolved": "https://registry.npmjs.org/defu/-/defu-6.1.7.tgz",
++      "integrity": "sha512-7z22QmUWiQ/2d0KkdYmANbRUVABpZ9SNYyH5vx6PZ+nE5bcC0l7uFvEfHlyld/HcGBFTL536ClDt3DEcSlEJAQ==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/delaunator": {
++      "version": "5.1.0",
++      "resolved": "https://registry.npmjs.org/delaunator/-/delaunator-5.1.0.tgz",
++      "integrity": "sha512-AGrQ4QSgssa1NGmWmLPqN5NY2KajF5MqxetNEO+o0n3ZwZZeTmt7bBnvzHWrmkZFxGgr4HdyFgelzgi06otLuQ==",
++      "devOptional": true,
++      "license": "ISC",
++      "dependencies": {
++        "robust-predicates": "^3.0.2"
++      }
++    },
+     "node_modules/depd": {
+       "version": "2.0.0",
+       "resolved": "https://registry.npmjs.org/depd/-/depd-2.0.0.tgz",
+@@ -713,6 +1814,13 @@
+         "node": ">= 0.8"
+       }
+     },
++    "node_modules/destr": {
++      "version": "2.0.5",
++      "resolved": "https://registry.npmjs.org/destr/-/destr-2.0.5.tgz",
++      "integrity": "sha512-ugFTXCtDZunbzasqBxrK93Ik/DRYsO6S/fedkWEMKqt04xZ4csmnmwGDBAb07QWNaGMAmnTIemsYZCksjATwsA==",
++      "devOptional": true,
++      "license": "MIT"
++    },
+     "node_modules/destroy": {
+       "version": "1.2.0",
+       "resolved": "https://registry.npmjs.org/destroy/-/destroy-1.2.0.tgz",
+@@ -723,6 +1831,73 @@
+         "npm": "1.2.8000 || >= 1.4.16"
+       }
+     },
++    "node_modules/dom-serializer": {
++      "version": "2.0.0",
++      "resolved": "https://registry.npmjs.org/dom-serializer/-/dom-serializer-2.0.0.tgz",
++      "integrity": "sha512-wIkAryiqt/nV5EQKqQpo3SToSOV9J0DnbJqwK7Wv/Trc92zIAYZ4FlMu+JPFW1DfGFt81ZTCGgDEabffXeLyJg==",
++      "license": "MIT",
++      "dependencies": {
++        "domelementtype": "^2.3.0",
++        "domhandler": "^5.0.2",
++        "entities": "^4.2.0"
++      },
++      "funding": {
++        "url": "https://github.com/cheeriojs/dom-serializer?sponsor=1"
++      }
++    },
++    "node_modules/domelementtype": {
++      "version": "2.3.0",
++      "resolved": "https://registry.npmjs.org/domelementtype/-/domelementtype-2.3.0.tgz",
++      "integrity": "sha512-OLETBj6w0OsagBwdXnPdN0cnMfF9opN69co+7ZrbfPGrdpPVNBUj02spi6B1N7wChLQiPn4CSH/zJvXw56gmHw==",
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fb55"
++        }
++      ],
++      "license": "BSD-2-Clause"
++    },
++    "node_modules/domhandler": {
++      "version": "5.0.3",
++      "resolved": "https://registry.npmjs.org/domhandler/-/domhandler-5.0.3.tgz",
++      "integrity": "sha512-cgwlv/1iFQiFnU96XXgROh8xTeetsnJiDsTc7TYCLFd9+/WNkIqPTxiM/8pSd8VIrhXGTf1Ny1q1hquVqDJB5w==",
++      "license": "BSD-2-Clause",
++      "dependencies": {
++        "domelementtype": "^2.3.0"
++      },
++      "engines": {
++        "node": ">= 4"
++      },
++      "funding": {
++        "url": "https://github.com/fb55/domhandler?sponsor=1"
++      }
++    },
++    "node_modules/domutils": {
++      "version": "3.2.2",
++      "resolved": "https://registry.npmjs.org/domutils/-/domutils-3.2.2.tgz",
++      "integrity": "sha512-6kZKyUajlDuqlHKVX1w7gyslj9MPIXzIFiz/rGu35uC1wMi+kMhQwGhl4lt9unC9Vb9INnY9Z3/ZA3+FhASLaw==",
++      "license": "BSD-2-Clause",
++      "dependencies": {
++        "dom-serializer": "^2.0.0",
++        "domelementtype": "^2.3.0",
++        "domhandler": "^5.0.3"
++      },
++      "funding": {
++        "url": "https://github.com/fb55/domutils?sponsor=1"
++      }
++    },
++    "node_modules/dotenv": {
++      "version": "16.6.1",
++      "resolved": "https://registry.npmjs.org/dotenv/-/dotenv-16.6.1.tgz",
++      "integrity": "sha512-uBq4egWHTcTt33a72vpSG0z3HnPuIl6NqYcTrKEg2azoEyl2hpW0zqlxysq2pK9HlDIHyHyakeYaYnSAwd8bow==",
++      "license": "BSD-2-Clause",
++      "engines": {
++        "node": ">=12"
++      },
++      "funding": {
++        "url": "https://dotenvx.com"
++      }
++    },
+     "node_modules/dunder-proto": {
+       "version": "1.0.1",
+       "resolved": "https://registry.npmjs.org/dunder-proto/-/dunder-proto-1.0.1.tgz",
+@@ -737,12 +1912,49 @@
+         "node": ">= 0.4"
+       }
+     },
++    "node_modules/ecdsa-sig-formatter": {
++      "version": "1.0.11",
++      "resolved": "https://registry.npmjs.org/ecdsa-sig-formatter/-/ecdsa-sig-formatter-1.0.11.tgz",
++      "integrity": "sha512-nagl3RYrbNv6kQkeJIpt6NJZy8twLB/2vtz6yN9Z4vRKHN4/QZJIEbqohALSgwKdnksuY3k5Addp5lg8sVoVcQ==",
++      "license": "Apache-2.0",
++      "dependencies": {
++        "safe-buffer": "^5.0.1"
++      }
++    },
+     "node_modules/ee-first": {
+       "version": "1.1.1",
+       "resolved": "https://registry.npmjs.org/ee-first/-/ee-first-1.1.1.tgz",
+       "integrity": "sha512-WMwm9LhRUo+WUaRN+vRuETqG89IgZphVSNkdFgeb6sS/E4OrDIN7t48CAewSHXc6C8lefD8KKfr5vY61brQlow==",
+       "license": "MIT"
+     },
++    "node_modules/effect": {
++      "version": "3.20.0",
++      "resolved": "https://registry.npmjs.org/effect/-/effect-3.20.0.tgz",
++      "integrity": "sha512-qMLfDJscrNG8p/aw+IkT9W7fgj50Z4wG5bLBy0Txsxz8iUHjDIkOgO3SV0WZfnQbNG2VJYb0b+rDLMrhM4+Krw==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "@standard-schema/spec": "^1.0.0",
++        "fast-check": "^3.23.1"
++      }
++    },
++    "node_modules/elkjs": {
++      "version": "0.11.1",
++      "resolved": "https://registry.npmjs.org/elkjs/-/elkjs-0.11.1.tgz",
++      "integrity": "sha512-zxxR9k+rx5ktMwT/FwyLdPCrq7xN6e4VGGHH8hA01vVYKjTFik7nHOxBnAYtrgYUB1RpAiLvA1/U2YraWxyKKg==",
++      "devOptional": true,
++      "license": "EPL-2.0"
++    },
++    "node_modules/empathic": {
++      "version": "2.0.0",
++      "resolved": "https://registry.npmjs.org/empathic/-/empathic-2.0.0.tgz",
++      "integrity": "sha512-i6UzDscO/XfAcNYD75CfICkmfLedpyPDdozrLMmQc5ORaQcdMoc21OnlEylMIqI7U8eniKrPMxxtj8k0vhmJhA==",
++      "devOptional": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=14"
++      }
++    },
+     "node_modules/encodeurl": {
+       "version": "2.0.3",
+       "resolved": "https://registry.npmjs.org/encodeurl/-/encodeurl-2.0.3.tgz",
+@@ -756,6 +1968,31 @@
+         "url": "https://opencollective.com/express"
+       }
+     },
++    "node_modules/entities": {
++      "version": "4.5.0",
++      "resolved": "https://registry.npmjs.org/entities/-/entities-4.5.0.tgz",
++      "integrity": "sha512-V0hjH4dGPh9Ao5p0MoRY6BVqtwCjhz6vI5LT8AJ55H+4g9/4vbHx1I54fS0XuclLhDHArPQCiMjDxjaL8fPxhw==",
++      "license": "BSD-2-Clause",
++      "engines": {
++        "node": ">=0.12"
++      },
++      "funding": {
++        "url": "https://github.com/fb55/entities?sponsor=1"
++      }
++    },
++    "node_modules/env-paths": {
++      "version": "3.0.0",
++      "resolved": "https://registry.npmjs.org/env-paths/-/env-paths-3.0.0.tgz",
++      "integrity": "sha512-dtJUTepzMW3Lm/NPxRf3wP4642UWhjL2sQxc+ym2YMj1m/H2zDNQOlezafzkHwn6sMstjHTwG6iQQsctDW/b1A==",
++      "devOptional": true,
++      "license": "MIT",
++      "engines": {
++        "node": "^12.20.0 || ^14.13.1 || >=16.0.0"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/sindresorhus"
++      }
++    },
+     "node_modules/es-define-property": {
+       "version": "1.0.1",
+       "resolved": "https://registry.npmjs.org/es-define-property/-/es-define-property-1.0.1.tgz",
+@@ -889,6 +2126,92 @@
+         "url": "https://opencollective.com/express"
+       }
+     },
++    "node_modules/express-rate-limit": {
++      "version": "7.5.1",
++      "resolved": "https://registry.npmjs.org/express-rate-limit/-/express-rate-limit-7.5.1.tgz",
++      "integrity": "sha512-7iN8iPMDzOMHPUYllBEsQdWVB6fPDMPqwjBaFrgr4Jgr/+okjvzAy+UHlYYL/Vs0OsOrMkwS6PJDkFlJwoxUnw==",
++      "license": "MIT",
++      "engines": {
++        "node": ">= 16"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/express-rate-limit"
++      },
++      "peerDependencies": {
++        "express": ">= 4.11"
++      }
++    },
++    "node_modules/exsolve": {
++      "version": "1.2.0",
++      "resolved": "https://registry.npmjs.org/exsolve/-/exsolve-1.2.0.tgz",
++      "integrity": "sha512-h1pQPR9XoeSMdntRNCjyTznaume4UpfXrULBnlkZ2CUM/G5eSa+pBByGldO5uR8dxbPC+OuJXsPPNf+JZ81ADg==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/fast-check": {
++      "version": "3.23.2",
++      "resolved": "https://registry.npmjs.org/fast-check/-/fast-check-3.23.2.tgz",
++      "integrity": "sha512-h5+1OzzfCC3Ef7VbtKdcv7zsstUQwUDlYpUTvjeUsJAssPgLn7QzbboPtL5ro04Mq0rPOsMzl7q5hIbRs2wD1A==",
++      "devOptional": true,
++      "funding": [
++        {
++          "type": "individual",
++          "url": "https://github.com/sponsors/dubzzz"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fast-check"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "pure-rand": "^6.1.0"
++      },
++      "engines": {
++        "node": ">=8.0.0"
++      }
++    },
++    "node_modules/fast-decode-uri-component": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/fast-decode-uri-component/-/fast-decode-uri-component-1.0.1.tgz",
++      "integrity": "sha512-WKgKWg5eUxvRZGwW8FvfbaH7AXSh2cL+3j5fMGzUMCxWBJ3dV3a7Wz8y2f/uQ0e3B6WmodD3oS54jTQ9HVTIIg==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/fast-deep-equal": {
++      "version": "3.1.3",
++      "resolved": "https://registry.npmjs.org/fast-deep-equal/-/fast-deep-equal-3.1.3.tgz",
++      "integrity": "sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/fast-querystring": {
++      "version": "1.1.2",
++      "resolved": "https://registry.npmjs.org/fast-querystring/-/fast-querystring-1.1.2.tgz",
++      "integrity": "sha512-g6KuKWmFXc0fID8WWH0jit4g0AGBoJhCkJMb1RmbsSEUNvQ+ZC8D6CUZ+GtF8nMzSPXnhiePyyqqipzNNEnHjg==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "fast-decode-uri-component": "^1.0.1"
++      }
++    },
++    "node_modules/fast-uri": {
++      "version": "3.1.9",
++      "resolved": "https://registry.npmjs.org/fast-uri/-/fast-uri-3.1.9.tgz",
++      "integrity": "sha512-hS/0Wt3Ya043oKXs0sIxrMpKQITXhMLIrVAKKXi4gozGC9v7YRWVnXIZzjNPTO02M9BdxLCWqK1yRXgNziVyJQ==",
++      "devOptional": true,
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fastify"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fastify"
++        }
++      ],
++      "license": "BSD-3-Clause"
++    },
+     "node_modules/finalhandler": {
+       "version": "1.3.2",
+       "resolved": "https://registry.npmjs.org/finalhandler/-/finalhandler-1.3.2.tgz",
+@@ -907,6 +2230,38 @@
+         "node": ">= 0.8"
+       }
+     },
++    "node_modules/find-my-way": {
++      "version": "9.7.0",
++      "resolved": "https://registry.npmjs.org/find-my-way/-/find-my-way-9.7.0.tgz",
++      "integrity": "sha512-f2JHn75x2JlwUwLenZypgczR7YWMb/uO9BvUXtus+JMgkbIkLADd38cI4EiV+OQqrGo1Zlq6V8wnqMJ8e62wUQ==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "fast-deep-equal": "^3.1.3",
++        "fast-querystring": "^1.0.0",
++        "safe-regex2": "^5.0.0"
++      },
++      "engines": {
++        "node": ">=20"
++      }
++    },
++    "node_modules/foreground-child": {
++      "version": "3.3.1",
++      "resolved": "https://registry.npmjs.org/foreground-child/-/foreground-child-3.3.1.tgz",
++      "integrity": "sha512-gIXjKqtFuWEgzFRJA9WCQeSJLZDjgJUOMCMzxtvFq/37KojM1BFGufqsCy0r4qSQmYLsZYMeyRqzIWOMup03sw==",
++      "devOptional": true,
++      "license": "ISC",
++      "dependencies": {
++        "cross-spawn": "^7.0.6",
++        "signal-exit": "^4.0.1"
++      },
++      "engines": {
++        "node": ">=14"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/isaacs"
++      }
++    },
+     "node_modules/forwarded": {
+       "version": "0.2.0",
+       "resolved": "https://registry.npmjs.org/forwarded/-/forwarded-0.2.0.tgz",
+@@ -949,6 +2304,16 @@
+         "url": "https://github.com/sponsors/ljharb"
+       }
+     },
++    "node_modules/generate-function": {
++      "version": "2.3.1",
++      "resolved": "https://registry.npmjs.org/generate-function/-/generate-function-2.3.1.tgz",
++      "integrity": "sha512-eeB5GfMNeevm/GRYq20ShmsaGcmI81kIX2K9XQx5miC8KdHaC6Jm0qQ8ZNeGOi7wYB8OsdxKs+Y2oVuTFuVwKQ==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "is-property": "^1.0.2"
++      }
++    },
+     "node_modules/get-intrinsic": {
+       "version": "1.3.0",
+       "resolved": "https://registry.npmjs.org/get-intrinsic/-/get-intrinsic-1.3.0.tgz",
+@@ -973,6 +2338,13 @@
+         "url": "https://github.com/sponsors/ljharb"
+       }
+     },
++    "node_modules/get-port-please": {
++      "version": "3.2.0",
++      "resolved": "https://registry.npmjs.org/get-port-please/-/get-port-please-3.2.0.tgz",
++      "integrity": "sha512-I9QVvBw5U/hw3RmWpYKRumUeaDgxTPd401x364rLmWBJcOQ753eov1eTgzDqRG9bqFIfDc7gfzcQEWrUri3o1A==",
++      "devOptional": true,
++      "license": "MIT"
++    },
+     "node_modules/get-proto": {
+       "version": "1.0.1",
+       "resolved": "https://registry.npmjs.org/get-proto/-/get-proto-1.0.1.tgz",
+@@ -986,6 +2358,16 @@
+         "node": ">= 0.4"
+       }
+     },
++    "node_modules/giget": {
++      "version": "3.3.1",
++      "resolved": "https://registry.npmjs.org/giget/-/giget-3.3.1.tgz",
++      "integrity": "sha512-r+mvuDjrjMpsdw46Kmeydb8bdHm7wOKw8wNBtTndkjbPjgAp5oUJUxRE76wZFknxIPokfWvep2qSXK37aXE6zg==",
++      "devOptional": true,
++      "license": "MIT",
++      "bin": {
++        "giget": "dist/cli.mjs"
++      }
++    },
+     "node_modules/gopd": {
+       "version": "1.2.0",
+       "resolved": "https://registry.npmjs.org/gopd/-/gopd-1.2.0.tgz",
+@@ -998,6 +2380,27 @@
+         "url": "https://github.com/sponsors/ljharb"
+       }
+     },
++    "node_modules/graceful-fs": {
++      "version": "4.2.12",
++      "resolved": "https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.12.tgz",
++      "integrity": "sha512-iuyGF2E4oafQfPsRrG2wtY2ILupMhvtdrhzrxB+0VcjsPpSPttpfYdjnGFGsTi5MaJFjI1jOKHPQ6UTbTj9TAw==",
++      "devOptional": true,
++      "license": "BlueOak-1.0.0"
++    },
++    "node_modules/grammex": {
++      "version": "3.1.13",
++      "resolved": "https://registry.npmjs.org/grammex/-/grammex-3.1.13.tgz",
++      "integrity": "sha512-LnPnhOBLEJEVKS8WFDVaA397L9Kq55Q9oSITJiVLHVdhAclfUkWzQv74KhvZHKL2Q09Pb1XdsrOsZ4LfTFFTEg==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/graphmatch": {
++      "version": "1.1.1",
++      "resolved": "https://registry.npmjs.org/graphmatch/-/graphmatch-1.1.1.tgz",
++      "integrity": "sha512-5ykVn/EXM1hF0XCaWh05VbYvEiOL2lY1kBxZtaYsyvjp7cmWOU1XsAdfQBwClraEofXDT197lFbXOEVMHpvQOg==",
++      "devOptional": true,
++      "license": "MIT"
++    },
+     "node_modules/has-symbols": {
+       "version": "1.1.0",
+       "resolved": "https://registry.npmjs.org/has-symbols/-/has-symbols-1.1.0.tgz",
+@@ -1022,20 +2425,67 @@
+         "node": ">= 0.4"
+       }
+     },
+-    "node_modules/http-errors": {
+-      "version": "2.0.1",
+-      "resolved": "https://registry.npmjs.org/http-errors/-/http-errors-2.0.1.tgz",
+-      "integrity": "sha512-4FbRdAX+bSdmo4AUFuS0WNiPz8NgFt+r8ThgNWmlrjQjt1Q7ZR9+zTlce2859x4KSXrwIsaeTqDoKQmtP8pLmQ==",
++    "node_modules/helmet": {
++      "version": "8.3.0",
++      "resolved": "https://registry.npmjs.org/helmet/-/helmet-8.3.0.tgz",
++      "integrity": "sha512-Qgpiaws3Sm30Av8Eah6sjMCZZwjlBu+E68rhpCWBshY1lb09HtLwj5GviX0OyQIn+ulUS0iX0AxN5n3tLZzz1w==",
+       "license": "MIT",
+-      "dependencies": {
+-        "depd": "~2.0.0",
+-        "inherits": "~2.0.4",
+-        "setprototypeof": "~1.2.0",
+-        "statuses": "~2.0.2",
+-        "toidentifier": "~1.0.1"
+-      },
+       "engines": {
+-        "node": ">= 0.8"
++        "node": ">=18.0.0"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/EvanHahn"
++      }
++    },
++    "node_modules/html-to-text": {
++      "version": "9.0.5",
++      "resolved": "https://registry.npmjs.org/html-to-text/-/html-to-text-9.0.5.tgz",
++      "integrity": "sha512-qY60FjREgVZL03vJU6IfMV4GDjGBIoOyvuFdpBDIX9yTlDw0TjxVBQp+P8NvpdIXNJvfWBTNul7fsAQJq2FNpg==",
++      "license": "MIT",
++      "dependencies": {
++        "@selderee/plugin-htmlparser2": "^0.11.0",
++        "deepmerge": "^4.3.1",
++        "dom-serializer": "^2.0.0",
++        "htmlparser2": "^8.0.2",
++        "selderee": "^0.11.0"
++      },
++      "engines": {
++        "node": ">=14"
++      }
++    },
++    "node_modules/htmlparser2": {
++      "version": "8.0.2",
++      "resolved": "https://registry.npmjs.org/htmlparser2/-/htmlparser2-8.0.2.tgz",
++      "integrity": "sha512-GYdjWKDkbRLkZ5geuHs5NY1puJ+PXwP7+fHPRz06Eirsb9ugf6d8kkXav6ADhcODhFFPMIXyxkxSuMf3D6NCFA==",
++      "funding": [
++        "https://github.com/fb55/htmlparser2?sponsor=1",
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fb55"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "domelementtype": "^2.3.0",
++        "domhandler": "^5.0.3",
++        "domutils": "^3.0.1",
++        "entities": "^4.4.0"
++      }
++    },
++    "node_modules/http-errors": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/http-errors/-/http-errors-2.0.1.tgz",
++      "integrity": "sha512-4FbRdAX+bSdmo4AUFuS0WNiPz8NgFt+r8ThgNWmlrjQjt1Q7ZR9+zTlce2859x4KSXrwIsaeTqDoKQmtP8pLmQ==",
++      "license": "MIT",
++      "dependencies": {
++        "depd": "~2.0.0",
++        "inherits": "~2.0.4",
++        "setprototypeof": "~1.2.0",
++        "statuses": "~2.0.2",
++        "toidentifier": "~1.0.1"
++      },
++      "engines": {
++        "node": ">= 0.8"
+       },
+       "funding": {
+         "type": "opencollective",
+@@ -1060,6 +2510,16 @@
+       "integrity": "sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ==",
+       "license": "ISC"
+     },
++    "node_modules/internmap": {
++      "version": "2.0.3",
++      "resolved": "https://registry.npmjs.org/internmap/-/internmap-2.0.3.tgz",
++      "integrity": "sha512-5Hh7Y1wQbvY5ooGgPbDaL5iYLAPzMTUrjMulskHLH6wnv/A+1q5rgEaiuqEjB+oxGXIVZs1FF+R/KPN3ZSQYYg==",
++      "devOptional": true,
++      "license": "ISC",
++      "engines": {
++        "node": ">=12"
++      }
++    },
+     "node_modules/ipaddr.js": {
+       "version": "1.9.1",
+       "resolved": "https://registry.npmjs.org/ipaddr.js/-/ipaddr.js-1.9.1.tgz",
+@@ -1069,6 +2529,167 @@
+         "node": ">= 0.10"
+       }
+     },
++    "node_modules/is-property": {
++      "version": "1.0.2",
++      "resolved": "https://registry.npmjs.org/is-property/-/is-property-1.0.2.tgz",
++      "integrity": "sha512-Ks/IoX00TtClbGQr4TWXemAnktAQvYB7HzcCxDGqEZU6oCmb2INHuOoKxbtR+HFkmYWBKv/dOZtGRiAjDhj92g==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/isexe": {
++      "version": "2.0.0",
++      "resolved": "https://registry.npmjs.org/isexe/-/isexe-2.0.0.tgz",
++      "integrity": "sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw==",
++      "devOptional": true,
++      "license": "ISC"
++    },
++    "node_modules/jiti": {
++      "version": "2.7.0",
++      "resolved": "https://registry.npmjs.org/jiti/-/jiti-2.7.0.tgz",
++      "integrity": "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==",
++      "devOptional": true,
++      "license": "MIT",
++      "bin": {
++        "jiti": "lib/jiti-cli.mjs"
++      }
++    },
++    "node_modules/json-schema-traverse": {
++      "version": "1.0.0",
++      "resolved": "https://registry.npmjs.org/json-schema-traverse/-/json-schema-traverse-1.0.0.tgz",
++      "integrity": "sha512-NM8/P9n3XjXhIZn1lLhkFaACTOURQXjWhV4BA/RnOv8xvgqtqpAX9IO4mRQxSx1Rlo4tqzeqb0sOlruaOy3dug==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/jsonwebtoken": {
++      "version": "9.0.3",
++      "resolved": "https://registry.npmjs.org/jsonwebtoken/-/jsonwebtoken-9.0.3.tgz",
++      "integrity": "sha512-MT/xP0CrubFRNLNKvxJ2BYfy53Zkm++5bX9dtuPbqAeQpTVe0MQTFhao8+Cp//EmJp244xt6Drw/GVEGCUj40g==",
++      "license": "MIT",
++      "dependencies": {
++        "jws": "^4.0.1",
++        "lodash.includes": "^4.3.0",
++        "lodash.isboolean": "^3.0.3",
++        "lodash.isinteger": "^4.0.4",
++        "lodash.isnumber": "^3.0.3",
++        "lodash.isplainobject": "^4.0.6",
++        "lodash.isstring": "^4.0.1",
++        "lodash.once": "^4.0.0",
++        "ms": "^2.1.1",
++        "semver": "^7.5.4"
++      },
++      "engines": {
++        "node": ">=12",
++        "npm": ">=6"
++      }
++    },
++    "node_modules/jsonwebtoken/node_modules/ms": {
++      "version": "2.1.3",
++      "resolved": "https://registry.npmjs.org/ms/-/ms-2.1.3.tgz",
++      "integrity": "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==",
++      "license": "MIT"
++    },
++    "node_modules/jwa": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/jwa/-/jwa-2.0.1.tgz",
++      "integrity": "sha512-hRF04fqJIP8Abbkq5NKGN0Bbr3JxlQ+qhZufXVr0DvujKy93ZCbXZMHDL4EOtodSbCWxOqR8MS1tXA5hwqCXDg==",
++      "license": "MIT",
++      "dependencies": {
++        "buffer-equal-constant-time": "^1.0.1",
++        "ecdsa-sig-formatter": "1.0.11",
++        "safe-buffer": "^5.0.1"
++      }
++    },
++    "node_modules/jws": {
++      "version": "4.0.1",
++      "resolved": "https://registry.npmjs.org/jws/-/jws-4.0.1.tgz",
++      "integrity": "sha512-EKI/M/yqPncGUUh44xz0PxSidXFr/+r0pA70+gIYhjv+et7yxM+s29Y+VGDkovRofQem0fs7Uvf4+YmAdyRduA==",
++      "license": "MIT",
++      "dependencies": {
++        "jwa": "^2.0.1",
++        "safe-buffer": "^5.0.1"
++      }
++    },
++    "node_modules/leac": {
++      "version": "0.6.0",
++      "resolved": "https://registry.npmjs.org/leac/-/leac-0.6.0.tgz",
++      "integrity": "sha512-y+SqErxb8h7nE/fiEX07jsbuhrpO9lL8eca7/Y1nuWV2moNlXhyd59iDGcRf6moVyDMbmTNzL40SUyrFU/yDpg==",
++      "license": "MIT",
++      "funding": {
++        "url": "https://ko-fi.com/killymxi"
++      }
++    },
++    "node_modules/lodash": {
++      "version": "4.18.1",
++      "resolved": "https://registry.npmjs.org/lodash/-/lodash-4.18.1.tgz",
++      "integrity": "sha512-dMInicTPVE8d1e5otfwmmjlxkZoUpiVLwyeTdUsi/Caj/gfzzblBcCE5sRHV/AsjuCmxWrte2TNGSYuCeCq+0Q==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/lodash.includes": {
++      "version": "4.3.0",
++      "resolved": "https://registry.npmjs.org/lodash.includes/-/lodash.includes-4.3.0.tgz",
++      "integrity": "sha512-W3Bx6mdkRTGtlJISOvVD/lbqjTlPPUDTMnlXZFnVwi9NKJ6tiAk6LVdlhZMm17VZisqhKcgzpO5Wz91PCt5b0w==",
++      "license": "MIT"
++    },
++    "node_modules/lodash.isboolean": {
++      "version": "3.0.3",
++      "resolved": "https://registry.npmjs.org/lodash.isboolean/-/lodash.isboolean-3.0.3.tgz",
++      "integrity": "sha512-Bz5mupy2SVbPHURB98VAcw+aHh4vRV5IPNhILUCsOzRmsTmSQ17jIuqopAentWoehktxGd9e/hbIXq980/1QJg==",
++      "license": "MIT"
++    },
++    "node_modules/lodash.isinteger": {
++      "version": "4.0.4",
++      "resolved": "https://registry.npmjs.org/lodash.isinteger/-/lodash.isinteger-4.0.4.tgz",
++      "integrity": "sha512-DBwtEWN2caHQ9/imiNeEA5ys1JoRtRfY3d7V9wkqtbycnAmTvRRmbHKDV4a0EYc678/dia0jrte4tjYwVBaZUA==",
++      "license": "MIT"
++    },
++    "node_modules/lodash.isnumber": {
++      "version": "3.0.3",
++      "resolved": "https://registry.npmjs.org/lodash.isnumber/-/lodash.isnumber-3.0.3.tgz",
++      "integrity": "sha512-QYqzpfwO3/CWf3XP+Z+tkQsfaLL/EnUlXWVkIk5FUPc4sBdTehEqZONuyRt2P67PXAk+NXmTBcc97zw9t1FQrw==",
++      "license": "MIT"
++    },
++    "node_modules/lodash.isplainobject": {
++      "version": "4.0.6",
++      "resolved": "https://registry.npmjs.org/lodash.isplainobject/-/lodash.isplainobject-4.0.6.tgz",
++      "integrity": "sha512-oSXzaWypCMHkPC3NvBEaPHf0KsA5mvPrOPgQWDsbg8n7orZ290M0BmC/jgRZ4vcJ6DTAhjrsSYgdsW/F+MFOBA==",
++      "license": "MIT"
++    },
++    "node_modules/lodash.isstring": {
++      "version": "4.0.1",
++      "resolved": "https://registry.npmjs.org/lodash.isstring/-/lodash.isstring-4.0.1.tgz",
++      "integrity": "sha512-0wJxfxH1wgO3GrbuP+dTTk7op+6L41QCXbGINEmD+ny/G/eCqGzxyCsh7159S+mgDDcoarnBw6PC1PS5+wUGgw==",
++      "license": "MIT"
++    },
++    "node_modules/lodash.once": {
++      "version": "4.1.1",
++      "resolved": "https://registry.npmjs.org/lodash.once/-/lodash.once-4.1.1.tgz",
++      "integrity": "sha512-Sb487aTOCr9drQVL8pIxOzVhafOjZN9UU54hiN8PU3uAiSV7lx1yYNpbNmex2PK6dSJoNTSJUUswT651yww3Mg==",
++      "license": "MIT"
++    },
++    "node_modules/long": {
++      "version": "5.3.2",
++      "resolved": "https://registry.npmjs.org/long/-/long-5.3.2.tgz",
++      "integrity": "sha512-mNAgZ1GmyNhD7AuqnTG3/VQ26o760+ZYBPKjPvugO8+nLbYfX6TVpJPseBvopbdY+qpZ/lKUnmEc1LeZYS3QAA==",
++      "devOptional": true,
++      "license": "Apache-2.0"
++    },
++    "node_modules/lru.min": {
++      "version": "1.1.5",
++      "resolved": "https://registry.npmjs.org/lru.min/-/lru.min-1.1.5.tgz",
++      "integrity": "sha512-5J9ysMYUpYIg9RF2vJpy9SinEmSviFSe0GyPpCQ4L5QSkLAgeLXlTAOu2ZwWUU5m+0SBl6gUU1R1ZQB3aKypfA==",
++      "devOptional": true,
++      "license": "MIT",
++      "engines": {
++        "bun": ">=1.0.0",
++        "deno": ">=1.30.0",
++        "node": ">=8.0.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wellwelwel"
++      }
++    },
+     "node_modules/math-intrinsics": {
+       "version": "1.1.0",
+       "resolved": "https://registry.npmjs.org/math-intrinsics/-/math-intrinsics-1.1.0.tgz",
+@@ -1144,6 +2765,58 @@
+       "integrity": "sha512-Tpp60P6IUJDTuOq/5Z8cdskzJujfwqfOTkrwIwj7IRISpnkJnT6SyJ4PCPnGMoFjC9ddhal5KVIYtAt97ix05A==",
+       "license": "MIT"
+     },
++    "node_modules/mysql2": {
++      "version": "3.24.4",
++      "resolved": "https://registry.npmjs.org/mysql2/-/mysql2-3.24.4.tgz",
++      "integrity": "sha512-A2olluVlj0mvgyIRRISMEzXc51m+21mRtcMVjJyIpt2GG98+XrC9m9HzsqcMsX2LcnfccJvY5NB22g8fENBnOA==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "aws-ssl-profiles": "^1.1.2",
++        "generate-function": "^2.3.1",
++        "iconv-lite": "^0.7.3",
++        "long": "^5.3.2",
++        "lru.min": "^1.1.4",
++        "named-placeholders": "^1.1.6",
++        "sql-escaper": "^1.5.1"
++      },
++      "engines": {
++        "node": ">= 8.0"
++      },
++      "peerDependencies": {
++        "@types/node": ">= 8"
++      }
++    },
++    "node_modules/mysql2/node_modules/iconv-lite": {
++      "version": "0.7.3",
++      "resolved": "https://registry.npmjs.org/iconv-lite/-/iconv-lite-0.7.3.tgz",
++      "integrity": "sha512-IKXpvIzjnC9XTAUbVBcMfGS0EPaIXtW6v+zr+RRp+hqULEpo0owZax6wyRwPOJbWbzjYspQwusTsfVr0ifh4uQ==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "safer-buffer": ">= 2.1.2 < 3.0.0"
++      },
++      "engines": {
++        "node": ">=0.10.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/express"
++      }
++    },
++    "node_modules/named-placeholders": {
++      "version": "1.1.6",
++      "resolved": "https://registry.npmjs.org/named-placeholders/-/named-placeholders-1.1.6.tgz",
++      "integrity": "sha512-Tz09sEL2EEuv5fFowm419c1+a/jSMiBjI9gHxVLrVdbUkkNUUfjsVYs9pVZu5oCon/kmRh9TfLEObFtkVxmY0w==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "lru.min": "^1.1.0"
++      },
++      "engines": {
++        "node": ">=8.0.0"
++      }
++    },
+     "node_modules/negotiator": {
+       "version": "0.6.3",
+       "resolved": "https://registry.npmjs.org/negotiator/-/negotiator-0.6.3.tgz",
+@@ -1153,6 +2826,15 @@
+         "node": ">= 0.6"
+       }
+     },
++    "node_modules/object-assign": {
++      "version": "4.1.1",
++      "resolved": "https://registry.npmjs.org/object-assign/-/object-assign-4.1.1.tgz",
++      "integrity": "sha512-rJgTQnkUnH1sFw8yT6VSU3zD3sWmu6sZhIseY8VX+GRu3P6F7Fu+JNDoXfklElbLJSnc3FUQHVe4cU5hj+BcUg==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=0.10.0"
++      }
++    },
+     "node_modules/object-inspect": {
+       "version": "1.13.4",
+       "resolved": "https://registry.npmjs.org/object-inspect/-/object-inspect-1.13.4.tgz",
+@@ -1165,6 +2847,13 @@
+         "url": "https://github.com/sponsors/ljharb"
+       }
+     },
++    "node_modules/ohash": {
++      "version": "2.0.12",
++      "resolved": "https://registry.npmjs.org/ohash/-/ohash-2.0.12.tgz",
++      "integrity": "sha512-65S/5gk9YSsaRjcyf7Nfa6h/d3E8/1gslpXfI4W7Dxn/oap8IKRuNT5VXkLQ1YFKIEg4apRY4Pj6aiwFzrDdmw==",
++      "devOptional": true,
++      "license": "MIT"
++    },
+     "node_modules/on-finished": {
+       "version": "2.4.2",
+       "resolved": "https://registry.npmjs.org/on-finished/-/on-finished-2.4.2.tgz",
+@@ -1181,6 +2870,19 @@
+         "url": "https://opencollective.com/express"
+       }
+     },
++    "node_modules/parseley": {
++      "version": "0.12.1",
++      "resolved": "https://registry.npmjs.org/parseley/-/parseley-0.12.1.tgz",
++      "integrity": "sha512-e6qHKe3a9HWr0oMRVDTRhKce+bRO8VGQR3NyVwcjwrbhMmFCX9KszEV35+rn4AdilFAq9VPxP/Fe1wC9Qjd2lw==",
++      "license": "MIT",
++      "dependencies": {
++        "leac": "^0.6.0",
++        "peberminta": "^0.9.0"
++      },
++      "funding": {
++        "url": "https://ko-fi.com/killymxi"
++      }
++    },
+     "node_modules/parseurl": {
+       "version": "1.3.3",
+       "resolved": "https://registry.npmjs.org/parseurl/-/parseurl-1.3.3.tgz",
+@@ -1190,12 +2892,283 @@
+         "node": ">= 0.8"
+       }
+     },
++    "node_modules/path-key": {
++      "version": "3.1.1",
++      "resolved": "https://registry.npmjs.org/path-key/-/path-key-3.1.1.tgz",
++      "integrity": "sha512-ojmeN0qd+y0jszEtoY48r0Peq5dwMEkIlCOu6Q5f41lfkswXuKtYrhgoTpLnyIcHm24Uhqx+5Tqm2InSwLhE6Q==",
++      "devOptional": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=8"
++      }
++    },
+     "node_modules/path-to-regexp": {
+       "version": "0.1.13",
+       "resolved": "https://registry.npmjs.org/path-to-regexp/-/path-to-regexp-0.1.13.tgz",
+       "integrity": "sha512-A/AGNMFN3c8bOlvV9RreMdrv7jsmF9XIfDeCd87+I8RNg6s78BhJxMu69NEMHBSJFxKidViTEdruRwEk/WIKqA==",
+       "license": "MIT"
+     },
++    "node_modules/pathe": {
++      "version": "2.0.3",
++      "resolved": "https://registry.npmjs.org/pathe/-/pathe-2.0.3.tgz",
++      "integrity": "sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/peberminta": {
++      "version": "0.9.0",
++      "resolved": "https://registry.npmjs.org/peberminta/-/peberminta-0.9.0.tgz",
++      "integrity": "sha512-XIxfHpEuSJbITd1H3EeQwpcZbTLHc+VVr8ANI9t5sit565tsI4/xK3KWTUFE2e6QiangUkh3B0jihzmGnNrRsQ==",
++      "license": "MIT",
++      "funding": {
++        "url": "https://ko-fi.com/killymxi"
++      }
++    },
++    "node_modules/perfect-debounce": {
++      "version": "2.1.0",
++      "resolved": "https://registry.npmjs.org/perfect-debounce/-/perfect-debounce-2.1.0.tgz",
++      "integrity": "sha512-LjgdTytVFXeUgtHZr9WYViYSM/g8MkcTPYDlPa3cDqMirHjKiSZPYd6DoL7pK8AJQr+uWkQvCjHNdiMqsrJs+g==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/pg": {
++      "version": "8.23.1",
++      "resolved": "https://registry.npmjs.org/pg/-/pg-8.23.1.tgz",
++      "integrity": "sha512-aL96AHANtWjPLDOLqnhx+ngp9+UK7ETEU8VJrDCGvsSSi/mGLcWYsS6Herg7lmaBJe4uwrfqsa7gTEFaSizDoQ==",
++      "license": "MIT",
++      "dependencies": {
++        "pg-connection-string": "^2.14.1",
++        "pg-pool": "^3.14.0",
++        "pg-protocol": "^1.16.1",
++        "pg-types": "2.2.0",
++        "pgpass": "1.0.5"
++      },
++      "engines": {
++        "node": ">= 16.0.0"
++      },
++      "optionalDependencies": {
++        "pg-cloudflare": "^1.4.1"
++      },
++      "peerDependencies": {
++        "pg-native": ">=3.0.1"
++      },
++      "peerDependenciesMeta": {
++        "pg-native": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/pg-cloudflare": {
++      "version": "1.4.1",
++      "resolved": "https://registry.npmjs.org/pg-cloudflare/-/pg-cloudflare-1.4.1.tgz",
++      "integrity": "sha512-6PQbsFWZcp9EmJEwy5cGQ2La+AMWpP46lgbb8X+U/XsHIUweYDNCpeuKck5RxL2MdVFi7krbbEi5nX4Zh7JhrQ==",
++      "license": "MIT",
++      "optional": true
++    },
++    "node_modules/pg-connection-string": {
++      "version": "2.14.1",
++      "resolved": "https://registry.npmjs.org/pg-connection-string/-/pg-connection-string-2.14.1.tgz",
++      "integrity": "sha512-qR3kGNPBLpCNtz0evbKA0Y/MRFXwSSdT+pTJvYp/bXTcReZbvX1kzF0IyTc1QnxqF7AZbOeBhNL8R5mYQZV/MA==",
++      "license": "MIT"
++    },
++    "node_modules/pg-int8": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/pg-int8/-/pg-int8-1.0.1.tgz",
++      "integrity": "sha512-WCtabS6t3c8SkpDBUlb1kjOs7l66xsGdKpIPZsg4wR+B3+u9UAum2odSsF9tnvxg80h4ZxLWMy4pRjOsFIqQpw==",
++      "license": "ISC",
++      "engines": {
++        "node": ">=4.0.0"
++      }
++    },
++    "node_modules/pg-pool": {
++      "version": "3.14.0",
++      "resolved": "https://registry.npmjs.org/pg-pool/-/pg-pool-3.14.0.tgz",
++      "integrity": "sha512-gKtPkFdQPU3DksooVLi9LsjZxrsBUZIpa+7aVx+LV5pNh0KzP4Zleud2po+ConrxbuXGBJ6Hfer6hdgpIBpBaw==",
++      "license": "MIT",
++      "peerDependencies": {
++        "pg": ">=8.0"
++      }
++    },
++    "node_modules/pg-protocol": {
++      "version": "1.16.1",
++      "resolved": "https://registry.npmjs.org/pg-protocol/-/pg-protocol-1.16.1.tgz",
++      "integrity": "sha512-p9VOFMiHB/ZbJATetbg+99PxssTVSQRnyuPSQ67mN1+1KBOjZaZ83ZQzltnxPhJwSsC3nwVjJ10DVJlerbFzLg==",
++      "license": "MIT"
++    },
++    "node_modules/pg-types": {
++      "version": "2.2.0",
++      "resolved": "https://registry.npmjs.org/pg-types/-/pg-types-2.2.0.tgz",
++      "integrity": "sha512-qTAAlrEsl8s4OiEQY69wDvcMIdQN6wdz5ojQiOy6YRMuynxenON0O5oCpJI6lshc6scgAY8qvJ2On/p+CXY0GA==",
++      "license": "MIT",
++      "dependencies": {
++        "pg-int8": "1.0.1",
++        "postgres-array": "~2.0.0",
++        "postgres-bytea": "~1.0.0",
++        "postgres-date": "~1.0.4",
++        "postgres-interval": "^1.1.0"
++      },
++      "engines": {
++        "node": ">=4"
++      }
++    },
++    "node_modules/pg-types/node_modules/postgres-array": {
++      "version": "2.0.0",
++      "resolved": "https://registry.npmjs.org/postgres-array/-/postgres-array-2.0.0.tgz",
++      "integrity": "sha512-VpZrUqU5A69eQyW2c5CA1jtLecCsN2U/bD6VilrFDWq5+5UIEVO7nazS3TEcHf1zuPYO/sqGvUvW62g86RXZuA==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=4"
++      }
++    },
++    "node_modules/pgpass": {
++      "version": "1.0.5",
++      "resolved": "https://registry.npmjs.org/pgpass/-/pgpass-1.0.5.tgz",
++      "integrity": "sha512-FdW9r/jQZhSeohs1Z3sI1yxFQNFvMcnmfuj4WBMUTxOrAyLMaTcE1aAMBiTlbMNaXvBCQuVi0R7hd8udDSP7ug==",
++      "license": "MIT",
++      "dependencies": {
++        "split2": "^4.1.0"
++      }
++    },
++    "node_modules/pkg-types": {
++      "version": "2.4.0",
++      "resolved": "https://registry.npmjs.org/pkg-types/-/pkg-types-2.4.0.tgz",
++      "integrity": "sha512-07Fys7iVx0X6TcviMOgogM1Lk33ZyqOezMnU79S+kffWqwolG/5W9V8EgQSeYCIfFTYVgssRbnH630Oa2+soBA==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "confbox": "^0.3.1",
++        "exsolve": "^1.1.3",
++        "pathe": "^2.0.3"
++      }
++    },
++    "node_modules/pkg-types/node_modules/confbox": {
++      "version": "0.3.2",
++      "resolved": "https://registry.npmjs.org/confbox/-/confbox-0.3.2.tgz",
++      "integrity": "sha512-ZUAKhKlkCOrIGKc8cj7zek9s9z1mveHif/25nUshI2BzCRzF7KH7KHa+Lnh2ubq+e1tIlaFuP763mzW4qVoehg==",
++      "devOptional": true,
++      "license": "MIT"
++    },
++    "node_modules/postgres": {
++      "version": "3.4.7",
++      "resolved": "https://registry.npmjs.org/postgres/-/postgres-3.4.7.tgz",
++      "integrity": "sha512-Jtc2612XINuBjIl/QTWsV5UvE8UHuNblcO3vVADSrKsrc6RqGX6lOW1cEo3CM2v0XG4Nat8nI+YM7/f26VxXLw==",
++      "devOptional": true,
++      "license": "Unlicense",
++      "engines": {
++        "node": ">=12"
++      },
++      "funding": {
++        "type": "individual",
++        "url": "https://github.com/sponsors/porsager"
++      }
++    },
++    "node_modules/postgres-array": {
++      "version": "3.0.4",
++      "resolved": "https://registry.npmjs.org/postgres-array/-/postgres-array-3.0.4.tgz",
++      "integrity": "sha512-nAUSGfSDGOaOAEGwqsRY27GPOea7CNipJPOA7lPbdEpx5Kg3qzdP0AaWC5MlhTWV9s4hFX39nomVZ+C4tnGOJQ==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=12"
++      }
++    },
++    "node_modules/postgres-bytea": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/postgres-bytea/-/postgres-bytea-1.0.1.tgz",
++      "integrity": "sha512-5+5HqXnsZPE65IJZSMkZtURARZelel2oXUEO8rH83VS/hxH5vv1uHquPg5wZs8yMAfdv971IU+kcPUczi7NVBQ==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=0.10.0"
++      }
++    },
++    "node_modules/postgres-date": {
++      "version": "1.0.7",
++      "resolved": "https://registry.npmjs.org/postgres-date/-/postgres-date-1.0.7.tgz",
++      "integrity": "sha512-suDmjLVQg78nMK2UZ454hAG+OAW+HQPZ6n++TNDUX+L0+uUlLywnoxJKDou51Zm+zTCjrCl0Nq6J9C5hP9vK/Q==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=0.10.0"
++      }
++    },
++    "node_modules/postgres-interval": {
++      "version": "1.2.0",
++      "resolved": "https://registry.npmjs.org/postgres-interval/-/postgres-interval-1.2.0.tgz",
++      "integrity": "sha512-9ZhXKM/rw350N1ovuWHbGxnGh/SNJ4cnxHiM0rxE4VN41wsg8P8zWn9hv/buK00RP4WvlOyr/RBDiptyxVbkZQ==",
++      "license": "MIT",
++      "dependencies": {
++        "xtend": "^4.0.0"
++      },
++      "engines": {
++        "node": ">=0.10.0"
++      }
++    },
++    "node_modules/prettier": {
++      "version": "3.10.1",
++      "resolved": "https://registry.npmjs.org/prettier/-/prettier-3.10.1.tgz",
++      "integrity": "sha512-70vp3ZUYoPlFbF9uiTdXHUUCGEIp7d4+6p+8DYbkm2jP7x/3i/paXVF6dopSI3zd/CEitrZN1rc4i85xWmmXlg==",
++      "license": "MIT",
++      "bin": {
++        "prettier": "bin/prettier.cjs"
++      },
++      "engines": {
++        "node": ">=14"
++      },
++      "funding": {
++        "url": "https://github.com/prettier/prettier?sponsor=1"
++      }
++    },
++    "node_modules/prisma": {
++      "version": "7.10.1",
++      "resolved": "https://registry.npmjs.org/prisma/-/prisma-7.10.1.tgz",
++      "integrity": "sha512-GoVeErHGGtsSjsflQ1r2BA3RKTXtxNraQJz8OLkLhoLr7OgCscdx4qw4WMM4HnERYc+a1cq2VnMNbep+vOjNcQ==",
++      "devOptional": true,
++      "hasInstallScript": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "@prisma/config": "7.10.1",
++        "@prisma/dev": "0.24.17",
++        "@prisma/engines": "7.10.1",
++        "@prisma/studio-core": "0.33.0",
++        "mysql2": "3.24.4",
++        "postgres": "3.4.7"
++      },
++      "bin": {
++        "prisma": "build/index.js"
++      },
++      "engines": {
++        "node": "^20.19 || ^22.12 || >=24.0"
++      },
++      "peerDependencies": {
++        "better-sqlite3": ">=9.0.0",
++        "typescript": ">=5.4.0"
++      },
++      "peerDependenciesMeta": {
++        "better-sqlite3": {
++          "optional": true
++        },
++        "typescript": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/proper-lockfile": {
++      "version": "4.1.2",
++      "resolved": "https://registry.npmjs.org/proper-lockfile/-/proper-lockfile-4.1.2.tgz",
++      "integrity": "sha512-TjNPblN4BwAWMXU8s9AEz4JmQxnD1NNL7bNOY/AKUzyamc379FWASUhc/K1pL2noVb+XmZKLL68cjzLsiOAMaA==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "graceful-fs": "^4.2.4",
++        "retry": "^0.12.0",
++        "signal-exit": "^3.0.2"
++      }
++    },
++    "node_modules/proper-lockfile/node_modules/signal-exit": {
++      "version": "3.0.7",
++      "resolved": "https://registry.npmjs.org/signal-exit/-/signal-exit-3.0.7.tgz",
++      "integrity": "sha512-wnD2ZE+l+SPC/uoS0vXeE9L1+0wuaMqKlfz9AMUo38JsyLSBWSFcHR1Rri62LZc12vLr1gb3jl7iwQhgwpAbGQ==",
++      "devOptional": true,
++      "license": "ISC"
++    },
+     "node_modules/proxy-addr": {
+       "version": "2.0.8",
+       "resolved": "https://registry.npmjs.org/proxy-addr/-/proxy-addr-2.0.8.tgz",
+@@ -1213,6 +3186,23 @@
+         "url": "https://opencollective.com/express"
+       }
+     },
++    "node_modules/pure-rand": {
++      "version": "6.1.0",
++      "resolved": "https://registry.npmjs.org/pure-rand/-/pure-rand-6.1.0.tgz",
++      "integrity": "sha512-bVWawvoZoBYpp6yIoQtQXHZjmz35RSVHnUOTefl8Vcjr8snTPY1wnpSPMWekcFwbxI6gtmT7rSYPFvz71ldiOA==",
++      "devOptional": true,
++      "funding": [
++        {
++          "type": "individual",
++          "url": "https://github.com/sponsors/dubzzz"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fast-check"
++        }
++      ],
++      "license": "MIT"
++    },
+     "node_modules/qs": {
+       "version": "6.16.2",
+       "resolved": "https://registry.npmjs.org/qs/-/qs-6.16.2.tgz",
+@@ -1253,6 +3243,128 @@
+         "node": ">= 0.8"
+       }
+     },
++    "node_modules/rc9": {
++      "version": "3.1.0",
++      "resolved": "https://registry.npmjs.org/rc9/-/rc9-3.1.0.tgz",
++      "integrity": "sha512-ufjkNVzbRHKcCOmTahZkmVsyc3W+MSk3jY03m+a7tGHkIsdVMG9l10/3HvFbWkkKzY5VFp3pkRsIo/UYgmFL7Q==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "defu": "^6.1.7",
++        "destr": "^2.0.5"
++      }
++    },
++    "node_modules/react": {
++      "version": "19.3.1",
++      "resolved": "https://registry.npmjs.org/react/-/react-19.3.1.tgz",
++      "integrity": "sha512-QNhWdt7nrgVWWQG58QuGsAR3jv3Hbe4mb4vz7w2csnHavciZJgda1CPNaldF6eVxv90ud3jUXpKlHL69gO38yw==",
++      "license": "MIT",
++      "peer": true,
++      "engines": {
++        "node": ">=0.10.0"
++      }
++    },
++    "node_modules/react-dom": {
++      "version": "19.3.1",
++      "resolved": "https://registry.npmjs.org/react-dom/-/react-dom-19.3.1.tgz",
++      "integrity": "sha512-Y0bARz53lhEC1NMCASs0/j+faB/zqt3R8hpvg1e8+61ZVJ4UL0UdC4cBbXfZMcIuhrfgeILTLe+ZeBCavQPtKQ==",
++      "license": "MIT",
++      "peer": true,
++      "dependencies": {
++        "scheduler": "^0.28.0"
++      },
++      "peerDependencies": {
++        "react": "^19.3.1"
++      }
++    },
++    "node_modules/react-promise-suspense": {
++      "version": "0.3.4",
++      "resolved": "https://registry.npmjs.org/react-promise-suspense/-/react-promise-suspense-0.3.4.tgz",
++      "integrity": "sha512-I42jl7L3Ze6kZaq+7zXWSunBa3b1on5yfvUW6Eo/3fFOj6dZ5Bqmcd264nJbTK/gn1HjjILAjSwnZbV4RpSaNQ==",
++      "license": "MIT",
++      "dependencies": {
++        "fast-deep-equal": "^2.0.1"
++      }
++    },
++    "node_modules/react-promise-suspense/node_modules/fast-deep-equal": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/fast-deep-equal/-/fast-deep-equal-2.0.1.tgz",
++      "integrity": "sha512-bCK/2Z4zLidyB4ReuIsvALH6w31YfAQDmXMqMx6FyfHqvBxtjC0eRumeSu4Bs3XtXwpyIywtSTrVT99BxY1f9w==",
++      "license": "MIT"
++    },
++    "node_modules/readdirp": {
++      "version": "5.1.1",
++      "resolved": "https://registry.npmjs.org/readdirp/-/readdirp-5.1.1.tgz",
++      "integrity": "sha512-Kko+Y5XQ6fM+Ce3dq3m9YGxnacYZYl9cA1wZjaF3Vbry2L3i1qVg8+CAgNPsXRArPMUMCaOR7oa9Nqntc43JKA==",
++      "devOptional": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 20.19.0"
++      },
++      "funding": {
++        "type": "individual",
++        "url": "https://paulmillr.com/funding/"
++      }
++    },
++    "node_modules/remeda": {
++      "version": "2.33.4",
++      "resolved": "https://registry.npmjs.org/remeda/-/remeda-2.33.4.tgz",
++      "integrity": "sha512-ygHswjlc/opg2VrtiYvUOPLjxjtdKvjGz1/plDhkG66hjNjFr1xmfrs2ClNFo/E6TyUFiwYNh53bKV26oBoMGQ==",
++      "devOptional": true,
++      "license": "MIT",
++      "funding": {
++        "url": "https://github.com/sponsors/remeda"
++      }
++    },
++    "node_modules/require-from-string": {
++      "version": "2.0.2",
++      "resolved": "https://registry.npmjs.org/require-from-string/-/require-from-string-2.0.2.tgz",
++      "integrity": "sha512-Xf0nWe6RseziFMu+Ap9biiUbmplq6S9/p+7w7YXP/JBHhrUDDUhwa+vANyubuqfZWTveU//DYVGsDG7RKL/vEw==",
++      "devOptional": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=0.10.0"
++      }
++    },
++    "node_modules/resend": {
++      "version": "4.8.0",
++      "resolved": "https://registry.npmjs.org/resend/-/resend-4.8.0.tgz",
++      "integrity": "sha512-R8eBOFQDO6dzRTDmaMEdpqrkmgSjPpVXt4nGfWsZdYOet0kqra0xgbvTES6HmCriZEXbmGk3e0DiGIaLFTFSHA==",
++      "license": "MIT",
++      "dependencies": {
++        "@react-email/render": "1.1.2"
++      },
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/ret": {
++      "version": "0.5.1",
++      "resolved": "https://registry.npmjs.org/ret/-/ret-0.5.1.tgz",
++      "integrity": "sha512-Z/nyvABwcRnRD2mMP7Kz6G1dFZZqX1mNErOnxF42OCQKE07b9k9hK9SQxHL3LFEZUdzQaLM4dId1E/E6Vm4WhA==",
++      "devOptional": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=10"
++      }
++    },
++    "node_modules/retry": {
++      "version": "0.12.0",
++      "resolved": "https://registry.npmjs.org/retry/-/retry-0.12.0.tgz",
++      "integrity": "sha512-9LkiTwjUh6rT555DtE9rTX+BKByPfrMzEAtnlEtdEwr3Nkffwiihqe2bWADg+OQRjt9gl6ICdmB/ZFDCGAtSow==",
++      "devOptional": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">= 4"
++      }
++    },
++    "node_modules/robust-predicates": {
++      "version": "3.0.3",
++      "resolved": "https://registry.npmjs.org/robust-predicates/-/robust-predicates-3.0.3.tgz",
++      "integrity": "sha512-NS3levdsRIUOmiJ8FZWCP7LG3QpJyrs/TE0Zpf1yvZu8cAJJ6QMW92H1c7kWpdIHo8RvmLxN/o2JXTKHp74lUA==",
++      "devOptional": true,
++      "license": "Unlicense"
++    },
+     "node_modules/safe-buffer": {
+       "version": "5.2.1",
+       "resolved": "https://registry.npmjs.org/safe-buffer/-/safe-buffer-5.2.1.tgz",
+@@ -1273,12 +3385,66 @@
+       ],
+       "license": "MIT"
+     },
++    "node_modules/safe-regex2": {
++      "version": "5.1.2",
++      "resolved": "https://registry.npmjs.org/safe-regex2/-/safe-regex2-5.1.2.tgz",
++      "integrity": "sha512-tAtCGFPPP02VroDVzp4daGi6bC7jWG+41D47GKf18FeH/ubvKQHT9VmhAkvtjNOmJwqtApzWeUpEhkyEYULvmw==",
++      "devOptional": true,
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fastify"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fastify"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "ret": "~0.5.0"
++      },
++      "bin": {
++        "safe-regex2": "bin/safe-regex2.js"
++      }
++    },
+     "node_modules/safer-buffer": {
+       "version": "2.1.2",
+       "resolved": "https://registry.npmjs.org/safer-buffer/-/safer-buffer-2.1.2.tgz",
+       "integrity": "sha512-YZo3K82SD7Riyi0E1EQPojLz7kpepnSQI9IyPbHHg1XXXevb5dJI7tpyN2ADxGcQbHG7vcyRHk0cbwqcQriUtg==",
+       "license": "MIT"
+     },
++    "node_modules/scheduler": {
++      "version": "0.28.0",
++      "resolved": "https://registry.npmjs.org/scheduler/-/scheduler-0.28.0.tgz",
++      "integrity": "sha512-juorfCmIkIw8tT+p5BXSm6PJjQF/ycEYmKyzURCIt/RaZIhL+PulbQ9Yu2z1HdOJDdqDTlxA1+xKBmHXJsczAw==",
++      "license": "MIT",
++      "peer": true
++    },
++    "node_modules/selderee": {
++      "version": "0.11.0",
++      "resolved": "https://registry.npmjs.org/selderee/-/selderee-0.11.0.tgz",
++      "integrity": "sha512-5TF+l7p4+OsnP8BCCvSyZiSPc4x4//p5uPwK8TCnVPJYRmU2aYKMpOXvw8zM5a5JvuuCGN1jmsMwuU2W02ukfA==",
++      "license": "MIT",
++      "dependencies": {
++        "parseley": "^0.12.0"
++      },
++      "funding": {
++        "url": "https://ko-fi.com/killymxi"
++      }
++    },
++    "node_modules/semver": {
++      "version": "7.8.6",
++      "resolved": "https://registry.npmjs.org/semver/-/semver-7.8.6.tgz",
++      "integrity": "sha512-9lpSSU4Mly3mrtruwLs1eLK6+gzbzqeBFwRNjIjE+9LuDpWdYctrQlQ3ej1Ilgi7gknpsTRnPoLP8DpCHqHIJw==",
++      "license": "ISC",
++      "bin": {
++        "semver": "bin/semver.js"
++      },
++      "engines": {
++        "node": ">=10"
++      }
++    },
+     "node_modules/send": {
+       "version": "0.19.2",
+       "resolved": "https://registry.npmjs.org/send/-/send-0.19.2.tgz",
+@@ -1330,6 +3496,29 @@
+       "integrity": "sha512-E5LDX7Wrp85Kil5bhZv46j8jOeboKq5JMmYM3gVGdGH8xFpPWXUMsNrlODCrkoxMEeNi/XZIwuRvY4XNwYMJpw==",
+       "license": "ISC"
+     },
++    "node_modules/shebang-command": {
++      "version": "2.0.0",
++      "resolved": "https://registry.npmjs.org/shebang-command/-/shebang-command-2.0.0.tgz",
++      "integrity": "sha512-kHxr2zZpYtdmrN1qDjrrX/Z1rR1kG8Dx+gkpK1G4eXmvXswmcE1hTWBWYUzlraYw1/yZp6YuDY77YtvbN0dmDA==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "shebang-regex": "^3.0.0"
++      },
++      "engines": {
++        "node": ">=8"
++      }
++    },
++    "node_modules/shebang-regex": {
++      "version": "3.0.0",
++      "resolved": "https://registry.npmjs.org/shebang-regex/-/shebang-regex-3.0.0.tgz",
++      "integrity": "sha512-7++dFhtcx3353uBaq8DDR4NuxBetBzC7ZQOhmTQInHEd6bSrXdiEyzCvG07Z44UYdLShWUyXt5M/yhz8ekcb1A==",
++      "devOptional": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=8"
++      }
++    },
+     "node_modules/side-channel": {
+       "version": "1.1.1",
+       "resolved": "https://registry.npmjs.org/side-channel/-/side-channel-1.1.1.tgz",
+@@ -1402,6 +3591,44 @@
+         "url": "https://github.com/sponsors/ljharb"
+       }
+     },
++    "node_modules/signal-exit": {
++      "version": "4.1.0",
++      "resolved": "https://registry.npmjs.org/signal-exit/-/signal-exit-4.1.0.tgz",
++      "integrity": "sha512-bzyZ1e88w9O1iNJbKnOlvYTrWPDl46O1bG0D3XInv+9tkPrxrN8jUUTiFlDkkmKWgn1M6CfIA13SuGqOa9Korw==",
++      "devOptional": true,
++      "license": "ISC",
++      "engines": {
++        "node": ">=14"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/isaacs"
++      }
++    },
++    "node_modules/split2": {
++      "version": "4.2.0",
++      "resolved": "https://registry.npmjs.org/split2/-/split2-4.2.0.tgz",
++      "integrity": "sha512-UcjcJOWknrNkF6PLX83qcHM6KHgVKNkV62Y8a5uYDVv9ydGQVwAHMKqHdJje1VTWpljG0WYpCDhrCdAOYH4TWg==",
++      "license": "ISC",
++      "engines": {
++        "node": ">= 10.x"
++      }
++    },
++    "node_modules/sql-escaper": {
++      "version": "1.8.0",
++      "resolved": "https://registry.npmjs.org/sql-escaper/-/sql-escaper-1.8.0.tgz",
++      "integrity": "sha512-yFiNdmHt7alRRKtwV8gDXwptAl7ppk4Owd9Reu/WCBpTdNeRun6ww8vgaoyoN3qzdUlDbfOi+C2dkXpxmXuHIA==",
++      "devOptional": true,
++      "license": "MIT",
++      "engines": {
++        "bun": ">=1.0.0",
++        "deno": ">=2.0.0",
++        "node": ">=12.0.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/mysqljs/sql-escaper?sponsor=1"
++      }
++    },
+     "node_modules/statuses": {
+       "version": "2.0.2",
+       "resolved": "https://registry.npmjs.org/statuses/-/statuses-2.0.2.tgz",
+@@ -1411,6 +3638,13 @@
+         "node": ">= 0.8"
+       }
+     },
++    "node_modules/std-env": {
++      "version": "3.10.0",
++      "resolved": "https://registry.npmjs.org/std-env/-/std-env-3.10.0.tgz",
++      "integrity": "sha512-5GS12FdOZNliM5mAOxFRg7Ir0pWz8MdpYm6AY6VPkGpbA7ZzmbzNcBJQ0GPvvyWgcY7QAhCgf9Uy89I03faLkg==",
++      "devOptional": true,
++      "license": "MIT"
++    },
+     "node_modules/toidentifier": {
+       "version": "1.0.1",
+       "resolved": "https://registry.npmjs.org/toidentifier/-/toidentifier-1.0.1.tgz",
+@@ -1456,7 +3690,7 @@
+       "version": "5.9.3",
+       "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz",
+       "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
+-      "dev": true,
++      "devOptional": true,
+       "license": "Apache-2.0",
+       "bin": {
+         "tsc": "bin/tsc",
+@@ -1470,7 +3704,6 @@
+       "version": "6.21.0",
+       "resolved": "https://registry.npmjs.org/undici-types/-/undici-types-6.21.0.tgz",
+       "integrity": "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==",
+-      "dev": true,
+       "license": "MIT"
+     },
+     "node_modules/unpipe": {
+@@ -1491,6 +3724,21 @@
+         "node": ">= 0.4.0"
+       }
+     },
++    "node_modules/valibot": {
++      "version": "1.4.2",
++      "resolved": "https://registry.npmjs.org/valibot/-/valibot-1.4.2.tgz",
++      "integrity": "sha512-gjdCvJ6d3RyHAneqxMYMW9QMCwYMb3jpOO0IyHZV1bnRHFBHrX3VkIILt5XYR0WhwHiH7Mty8ovuPZ/O3gamrg==",
++      "devOptional": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "typescript": ">=5"
++      },
++      "peerDependenciesMeta": {
++        "typescript": {
++          "optional": true
++        }
++      }
++    },
+     "node_modules/vary": {
+       "version": "1.1.2",
+       "resolved": "https://registry.npmjs.org/vary/-/vary-1.1.2.tgz",
+@@ -1499,6 +3747,51 @@
+       "engines": {
+         "node": ">= 0.8"
+       }
++    },
++    "node_modules/which": {
++      "version": "2.0.2",
++      "resolved": "https://registry.npmjs.org/which/-/which-2.0.2.tgz",
++      "integrity": "sha512-BLI3Tl1TW3Pvl70l3yq3Y64i+awpwXqsGBYWkkqMtnbXgrMD+yj7rhW0kuEDxzJaYXGjEW5ogapKNMEKNMjibA==",
++      "devOptional": true,
++      "license": "ISC",
++      "dependencies": {
++        "isexe": "^2.0.0"
++      },
++      "bin": {
++        "node-which": "bin/node-which"
++      },
++      "engines": {
++        "node": ">= 8"
++      }
++    },
++    "node_modules/xtend": {
++      "version": "4.0.2",
++      "resolved": "https://registry.npmjs.org/xtend/-/xtend-4.0.2.tgz",
++      "integrity": "sha512-LKYU1iAXJXUgAXn9URjiu+MWhyUXHsvfp7mcuYm9dSUKK0/CjtrUwFAxD82/mCWbtLsGjFIad0wIsod4zrTAEQ==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=0.4"
++      }
++    },
++    "node_modules/zeptomatch": {
++      "version": "2.1.0",
++      "resolved": "https://registry.npmjs.org/zeptomatch/-/zeptomatch-2.1.0.tgz",
++      "integrity": "sha512-KiGErG2J0G82LSpniV0CtIzjlJ10E04j02VOudJsPyPwNZgGnRKQy7I1R7GMyg/QswnE4l7ohSGrQbQbjXPPDA==",
++      "devOptional": true,
++      "license": "MIT",
++      "dependencies": {
++        "grammex": "^3.1.11",
++        "graphmatch": "^1.1.0"
++      }
++    },
++    "node_modules/zod": {
++      "version": "3.25.76",
++      "resolved": "https://registry.npmjs.org/zod/-/zod-3.25.76.tgz",
++      "integrity": "sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==",
++      "license": "MIT",
++      "funding": {
++        "url": "https://github.com/sponsors/colinhacks"
++      }
+     }
+   }
+ }
+diff --git a/package.json b/package.json
+index 0221bad..5b4d274 100644
+--- a/package.json
++++ b/package.json
+@@ -1,22 +1,49 @@
+ {
+   "name": "hello-api",
+   "version": "1.0.0",
+-  "description": "API Hello World avec Node.js, TypeScript et Express",
+-  "main": "dist/index.js",
++  "private": true,
++  "description": "API REST (Node.js, TypeScript, Express, Prisma) avec authentification et invitation d'utilisateurs",
++  "main": "dist/server.js",
+   "scripts": {
+-    "dev": "tsx watch src/index.ts",
+-    "build": "tsc",
+-    "start": "node dist/index.js"
++    "dev": "tsx watch src/server.ts",
++    "build": "prisma generate && tsc",
++    "start": "node dist/server.js",
++    "typecheck": "tsc --noEmit",
++    "prisma:generate": "prisma generate",
++    "prisma:format": "prisma format",
++    "prisma:validate": "prisma validate",
++    "prisma:migrate": "prisma migrate dev",
++    "prisma:deploy": "prisma migrate deploy",
++    "prisma:status": "prisma migrate status",
++    "prisma:reset": "prisma migrate reset",
++    "prisma:studio": "prisma studio",
++    "prisma:seed": "prisma db seed",
++    "prisma:push": "prisma db push"
+   },
+-  "keywords": [],
+-  "license": "MIT",
+   "dependencies": {
+-    "express": "^4.21.2"
++    "@prisma/adapter-pg": "^7.0.0",
++    "@prisma/client": "^7.0.0",
++    "bcryptjs": "^3.0.2",
++    "cors": "^2.8.5",
++    "dotenv": "^16.4.5",
++    "express": "^4.21.2",
++    "express-rate-limit": "^7.5.0",
++    "helmet": "^8.0.0",
++    "jsonwebtoken": "^9.0.2",
++    "pg": "^8.13.1",
++    "resend": "^4.0.1",
++    "zod": "^3.24.1"
+   },
+   "devDependencies": {
++    "@types/bcryptjs": "^2.4.6",
++    "@types/cors": "^2.8.17",
+     "@types/express": "^4.17.21",
++    "@types/jsonwebtoken": "^9.0.7",
+     "@types/node": "^22.10.0",
++    "@types/pg": "^8.11.10",
++    "prisma": "^7.0.0",
+     "tsx": "^4.19.2",
+     "typescript": "^5.7.2"
+-  }
++  },
++  "license": "MIT"
+ }
+diff --git a/prisma.config.ts b/prisma.config.ts
+new file mode 100644
+index 0000000..60357ad
+--- /dev/null
++++ b/prisma.config.ts
+@@ -0,0 +1,13 @@
++import 'dotenv/config';
++import { defineConfig, env } from 'prisma/config';
++
++export default defineConfig({
++  schema: 'prisma/schema.prisma',
++  migrations: {
++    path: 'prisma/migrations',
++    seed: 'tsx prisma/seed.ts',
++  },
++  datasource: {
++    url: env('DATABASE_URL'),
++  },
++});
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+new file mode 100644
+index 0000000..747ffd9
+--- /dev/null
++++ b/prisma/schema.prisma
+@@ -0,0 +1,58 @@
++generator client {
++  provider     = "prisma-client"
++  output       = "../src/generated/prisma"
++  moduleFormat = "cjs"
++}
++
++datasource db {
++  provider = "postgresql"
++}
++
++enum Role {
++  SUPER_ADMIN
++  ADMIN
++  AGENT
++  USER
++}
++
++enum TokenType {
++  INVITATION
++  PASSWORD_RESET
++  REFRESH
++}
++
++model User {
++  id           String    @id @default(uuid())
++  email        String    @unique
++  firstName    String
++  lastName     String
++  // null tant que l'invitation n'a pas été acceptée
++  passwordHash String?
++  role         Role      @default(USER)
++  isActive     Boolean   @default(true)
++  invitedById  String?
++  invitedBy    User?     @relation("Invitations", fields: [invitedById], references: [id])
++  invitees     User[]    @relation("Invitations")
++  lastLoginAt  DateTime?
++  createdAt    DateTime  @default(now())
++  updatedAt    DateTime  @updatedAt
++  tokens       Token[]
++
++  @@map("users")
++}
++
++// Un seul tableau pour les jetons à usage unique : invitation, reset, refresh.
++// On ne stocke JAMAIS le jeton en clair, seulement son hash SHA-256.
++model Token {
++  id        String    @id @default(uuid())
++  type      TokenType
++  tokenHash String    @unique
++  userId    String
++  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
++  expiresAt DateTime
++  usedAt    DateTime?
++  createdAt DateTime  @default(now())
++
++  @@index([userId, type])
++  @@map("tokens")
++}
+diff --git a/prisma/seed.ts b/prisma/seed.ts
+new file mode 100644
+index 0000000..932c900
+--- /dev/null
++++ b/prisma/seed.ts
+@@ -0,0 +1,39 @@
++import 'dotenv/config';
++import bcrypt from 'bcryptjs';
++import { PrismaPg } from '@prisma/adapter-pg';
++import { PrismaClient } from '../src/generated/prisma/client';
++
++// Pas d'inscription publique : ce script crée le tout premier Super Admin.
++async function main() {
++  const email = process.env.SEED_ADMIN_EMAIL;
++  const password = process.env.SEED_ADMIN_PASSWORD;
++  if (!email || !password) {
++    throw new Error('SEED_ADMIN_EMAIL et SEED_ADMIN_PASSWORD doivent être définis dans .env');
++  }
++
++  const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
++  const prisma = new PrismaClient({ adapter });
++
++  try {
++    const passwordHash = await bcrypt.hash(password, 12);
++    const user = await prisma.user.upsert({
++      where: { email: email.toLowerCase() },
++      update: {},
++      create: {
++        email: email.toLowerCase(),
++        firstName: 'Super',
++        lastName: 'Admin',
++        role: 'SUPER_ADMIN',
++        passwordHash,
++      },
++    });
++    console.log(`Super Admin prêt : ${user.email}`);
++  } finally {
++    await prisma.$disconnect();
++  }
++}
++
++main().catch((err) => {
++  console.error(err);
++  process.exit(1);
++});
+diff --git a/src/app.ts b/src/app.ts
+new file mode 100644
+index 0000000..e4db6ee
+--- /dev/null
++++ b/src/app.ts
+@@ -0,0 +1,24 @@
++import cors from 'cors';
++import express from 'express';
++import helmet from 'helmet';
++import { errorHandler, notFoundHandler } from './middlewares/errorHandler';
++import healthRouter from './routers/healthRouter';
++import helloRouter from './routers/helloRouter';
++import apiRouter from './routers';
++import { env } from './utils/env';
++
++const app = express();
++
++app.use(helmet());
++app.use(cors({ origin: env.FRONTEND_URL }));
++app.use(express.json());
++
++app.use('/', helloRouter);
++app.use('/health', healthRouter);
++app.use('/api', apiRouter);
++
++// Toujours en dernier.
++app.use(notFoundHandler);
++app.use(errorHandler);
++
++export default app;
+diff --git a/src/controllers/authController.ts b/src/controllers/authController.ts
+new file mode 100644
+index 0000000..a0d9cfa
+--- /dev/null
++++ b/src/controllers/authController.ts
+@@ -0,0 +1,48 @@
++import { Request, Response } from 'express';
++import * as authService from '../services/authService';
++import { unauthorized } from '../utils/AppError';
++
++// Les controllers font peu de choses : lire la requête, appeler un service, répondre.
++// La logique métier reste dans services/.
++
++export async function login(req: Request, res: Response) {
++  const result = await authService.login(req.body.email, req.body.password);
++  res.json(result);
++}
++
++export async function refresh(req: Request, res: Response) {
++  const tokens = await authService.refresh(req.body.refreshToken);
++  res.json(tokens);
++}
++
++export async function logout(req: Request, res: Response) {
++  await authService.logout(req.body.refreshToken);
++  res.status(204).send();
++}
++
++export async function me(req: Request, res: Response) {
++  if (!req.user) throw unauthorized();
++  res.json(await authService.getMe(req.user.id));
++}
++
++export async function forgotPassword(req: Request, res: Response) {
++  await authService.forgotPassword(req.body.email);
++  // Toujours la même réponse, que l'e-mail existe ou non.
++  res.json({ message: 'Si un compte existe avec cet e-mail, un lien de réinitialisation a été envoyé.' });
++}
++
++export async function resetPassword(req: Request, res: Response) {
++  await authService.resetPassword(req.body.token, req.body.newPassword);
++  res.json({ message: 'Mot de passe mis à jour. Tu peux te reconnecter.' });
++}
++
++export async function acceptInvitation(req: Request, res: Response) {
++  await authService.acceptInvitation(req.body.token, req.body.password);
++  res.json({ message: 'Compte activé. Tu peux te connecter.' });
++}
++
++export async function changePassword(req: Request, res: Response) {
++  if (!req.user) throw unauthorized();
++  await authService.changePassword(req.user.id, req.body.currentPassword, req.body.newPassword);
++  res.json({ message: 'Mot de passe modifié. Reconnecte-toi.' });
++}
+diff --git a/src/controllers/healthController.ts b/src/controllers/healthController.ts
+new file mode 100644
+index 0000000..072293d
+--- /dev/null
++++ b/src/controllers/healthController.ts
+@@ -0,0 +1,23 @@
++import { Request, Response } from 'express';
++import { env } from '../utils/env';
++import { maskDatabaseUrl } from '../utils/maskDatabaseUrl';
++import { prisma } from '../utils/prisma';
++
++// GET /health : lance une requête minimale sur la base pour vérifier qu'elle répond.
++export async function health(_req: Request, res: Response) {
++  const databaseUrl = maskDatabaseUrl(env.DATABASE_URL);
++
++  try {
++    await prisma.$queryRaw`SELECT 1`;
++    console.log(`[health] Base de données OK -> ${databaseUrl}`);
++    res.json({ status: 'ok', database: 'connected', timestamp: new Date().toISOString() });
++  } catch (error) {
++    console.error(`[health] Base de données INJOIGNABLE -> ${databaseUrl}`);
++    console.error(error);
++    res.status(503).json({
++      status: 'error',
++      database: 'unreachable',
++      timestamp: new Date().toISOString(),
++    });
++  }
++}
+diff --git a/src/controllers/userController.ts b/src/controllers/userController.ts
+new file mode 100644
+index 0000000..abcc8e6
+--- /dev/null
++++ b/src/controllers/userController.ts
+@@ -0,0 +1,19 @@
++import { Request, Response } from 'express';
++import * as userService from '../services/userService';
++import { unauthorized } from '../utils/AppError';
++
++export async function invite(req: Request, res: Response) {
++  if (!req.user) throw unauthorized();
++  const user = await userService.inviteUser(req.user, req.body);
++  res.status(201).json({ message: 'Invitation envoyée', user });
++}
++
++export async function list(_req: Request, res: Response) {
++  res.json(await userService.listUsers());
++}
++
++export async function setStatus(req: Request, res: Response) {
++  if (!req.user) throw unauthorized();
++  await userService.setUserActive(req.user, req.params.id, req.body.isActive);
++  res.json({ message: req.body.isActive ? 'Compte réactivé' : 'Compte désactivé' });
++}
+diff --git a/src/index.ts b/src/index.ts
+deleted file mode 100644
+index e3e9539..0000000
+--- a/src/index.ts
++++ /dev/null
+@@ -1,18 +0,0 @@
+-import express, { Request, Response } from "express";
+-
+-const app = express();
+-const port = Number(process.env.PORT) || 3000;
+-
+-app.use(express.json());
+-
+-app.get("/", (_req: Request, res: Response) => {
+-  res.json({ message: "Hello, World!" });
+-});
+-
+-app.get("/hello/:name", (req: Request, res: Response) => {
+-  res.json({ message: `Hello, ${req.params.name}!` });
+-});
+-
+-app.listen(port, () => {
+-  console.log(`Serveur démarré sur http://localhost:${port}`);
+-});
+diff --git a/src/middlewares/authenticate.ts b/src/middlewares/authenticate.ts
+new file mode 100644
+index 0000000..f0dbdab
+--- /dev/null
++++ b/src/middlewares/authenticate.ts
+@@ -0,0 +1,27 @@
++import { NextFunction, Request, Response } from 'express';
++import { Role } from '../generated/prisma/client';
++import { unauthorized } from '../utils/AppError';
++import { verifyAccessToken } from '../utils/tokens';
++
++// On ajoute `req.user` au type Request d'Express.
++declare global {
++  namespace Express {
++    interface Request {
++      user?: { id: string; role: Role };
++    }
++  }
++}
++
++// Vérifie l'en-tête "Authorization: Bearer <accessToken>".
++export function authenticate(req: Request, _res: Response, next: NextFunction) {
++  const header = req.headers.authorization;
++  if (!header?.startsWith('Bearer ')) return next(unauthorized('Token manquant'));
++
++  try {
++    const payload = verifyAccessToken(header.slice(7));
++    req.user = { id: payload.sub, role: payload.role as Role };
++    next();
++  } catch {
++    next(unauthorized('Token invalide ou expiré'));
++  }
++}
+diff --git a/src/middlewares/authorize.ts b/src/middlewares/authorize.ts
+new file mode 100644
+index 0000000..c4414f9
+--- /dev/null
++++ b/src/middlewares/authorize.ts
+@@ -0,0 +1,12 @@
++import { NextFunction, Request, Response } from 'express';
++import { Role } from '../generated/prisma/client';
++import { forbidden, unauthorized } from '../utils/AppError';
++
++// À placer APRÈS authenticate : authorize(Role.ADMIN, Role.SUPER_ADMIN)
++export const authorize =
++  (...allowedRoles: Role[]) =>
++  (req: Request, _res: Response, next: NextFunction) => {
++    if (!req.user) return next(unauthorized());
++    if (!allowedRoles.includes(req.user.role)) return next(forbidden());
++    next();
++  };
+diff --git a/src/middlewares/errorHandler.ts b/src/middlewares/errorHandler.ts
+new file mode 100644
+index 0000000..1ee20f6
+--- /dev/null
++++ b/src/middlewares/errorHandler.ts
+@@ -0,0 +1,20 @@
++import { NextFunction, Request, Response } from 'express';
++import { AppError } from '../utils/AppError';
++import { env } from '../utils/env';
++
++export function notFoundHandler(req: Request, res: Response) {
++  res.status(404).json({ message: `Route introuvable : ${req.method} ${req.originalUrl}` });
++}
++
++// Dernier middleware : toutes les erreurs passent ici.
++export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction) {
++  if (err instanceof AppError) {
++    return res.status(err.statusCode).json({ message: err.message });
++  }
++
++  console.error(err);
++  res.status(500).json({
++    message: 'Erreur interne du serveur',
++    ...(env.NODE_ENV === 'development' && { detail: String(err) }),
++  });
++}
+diff --git a/src/middlewares/rateLimiters.ts b/src/middlewares/rateLimiters.ts
+new file mode 100644
+index 0000000..e45839b
+--- /dev/null
++++ b/src/middlewares/rateLimiters.ts
+@@ -0,0 +1,10 @@
++import rateLimit from 'express-rate-limit';
++
++// Limite les tentatives sur les routes sensibles (anti brute-force, anti spam d'e-mails).
++export const authLimiter = rateLimit({
++  windowMs: 15 * 60 * 1000,
++  limit: 20,
++  standardHeaders: true,
++  legacyHeaders: false,
++  message: { message: 'Trop de tentatives, réessaie dans quelques minutes' },
++});
+diff --git a/src/middlewares/validate.ts b/src/middlewares/validate.ts
+new file mode 100644
+index 0000000..9caec3d
+--- /dev/null
++++ b/src/middlewares/validate.ts
+@@ -0,0 +1,17 @@
++import { NextFunction, Request, Response } from 'express';
++import { ZodSchema } from 'zod';
++
++// Valide req.body avec un schéma Zod. Si c'est bon, req.body est remplacé
++// par la version nettoyée (types corrects, champs inconnus retirés).
++export const validate =
++  (schema: ZodSchema) => (req: Request, res: Response, next: NextFunction) => {
++    const result = schema.safeParse(req.body);
++    if (!result.success) {
++      return res.status(400).json({
++        message: 'Données invalides',
++        errors: result.error.flatten().fieldErrors,
++      });
++    }
++    req.body = result.data;
++    next();
++  };
+diff --git a/src/routers/adminRouter.ts b/src/routers/adminRouter.ts
+new file mode 100644
+index 0000000..e2f9ad1
+--- /dev/null
++++ b/src/routers/adminRouter.ts
+@@ -0,0 +1,19 @@
++import { Router } from 'express';
++import { Role } from '../generated/prisma/client';
++import * as users from '../controllers/userController';
++import { authenticate } from '../middlewares/authenticate';
++import { authorize } from '../middlewares/authorize';
++import { validate } from '../middlewares/validate';
++import { asyncHandler } from '../utils/asyncHandler';
++import { inviteUserSchema, setStatusSchema } from '../utils/schemas';
++
++const router = Router();
++
++// Tout ce router est réservé aux admins connectés.
++router.use(authenticate, authorize(Role.ADMIN, Role.SUPER_ADMIN));
++
++router.get('/users', asyncHandler(users.list));
++router.post('/users/invite', validate(inviteUserSchema), asyncHandler(users.invite));
++router.patch('/users/:id/status', validate(setStatusSchema), asyncHandler(users.setStatus));
++
++export default router;
+diff --git a/src/routers/authRouter.ts b/src/routers/authRouter.ts
+new file mode 100644
+index 0000000..c6a908c
+--- /dev/null
++++ b/src/routers/authRouter.ts
+@@ -0,0 +1,30 @@
++import { Router } from 'express';
++import * as auth from '../controllers/authController';
++import { authenticate } from '../middlewares/authenticate';
++import { authLimiter } from '../middlewares/rateLimiters';
++import { validate } from '../middlewares/validate';
++import { asyncHandler } from '../utils/asyncHandler';
++import {
++  acceptInvitationSchema,
++  changePasswordSchema,
++  forgotPasswordSchema,
++  loginSchema,
++  refreshSchema,
++  resetPasswordSchema,
++} from '../utils/schemas';
++
++const router = Router();
++
++// Routes publiques (limitées en nombre de tentatives)
++router.post('/login', authLimiter, validate(loginSchema), asyncHandler(auth.login));
++router.post('/refresh', authLimiter, validate(refreshSchema), asyncHandler(auth.refresh));
++router.post('/logout', validate(refreshSchema), asyncHandler(auth.logout));
++router.post('/forgot-password', authLimiter, validate(forgotPasswordSchema), asyncHandler(auth.forgotPassword));
++router.post('/reset-password', authLimiter, validate(resetPasswordSchema), asyncHandler(auth.resetPassword));
++router.post('/accept-invitation', authLimiter, validate(acceptInvitationSchema), asyncHandler(auth.acceptInvitation));
++
++// Routes protégées (token d'accès obligatoire)
++router.get('/me', authenticate, asyncHandler(auth.me));
++router.post('/change-password', authenticate, validate(changePasswordSchema), asyncHandler(auth.changePassword));
++
++export default router;
+diff --git a/src/routers/healthRouter.ts b/src/routers/healthRouter.ts
+new file mode 100644
+index 0000000..a48d5ac
+--- /dev/null
++++ b/src/routers/healthRouter.ts
+@@ -0,0 +1,9 @@
++import { Router } from 'express';
++import { health } from '../controllers/healthController';
++import { asyncHandler } from '../utils/asyncHandler';
++
++const router = Router();
++
++router.get('/', asyncHandler(health));
++
++export default router;
+diff --git a/src/routers/helloRouter.ts b/src/routers/helloRouter.ts
+new file mode 100644
+index 0000000..e217bc1
+--- /dev/null
++++ b/src/routers/helloRouter.ts
+@@ -0,0 +1,14 @@
++import { Request, Response, Router } from 'express';
++
++// Routes d'origine de l'API "hello", conservées telles quelles.
++const router = Router();
++
++router.get('/', (_req: Request, res: Response) => {
++  res.json({ message: 'Hello, World!' });
++});
++
++router.get('/hello/:name', (req: Request, res: Response) => {
++  res.json({ message: `Hello, ${req.params.name}!` });
++});
++
++export default router;
+diff --git a/src/routers/index.ts b/src/routers/index.ts
+new file mode 100644
+index 0000000..51ab07a
+--- /dev/null
++++ b/src/routers/index.ts
+@@ -0,0 +1,11 @@
++import { Router } from 'express';
++import adminRouter from './adminRouter';
++import authRouter from './authRouter';
++
++// Regroupe les routers sous /api. (/health est monté directement dans app.ts.)
++const router = Router();
++
++router.use('/auth', authRouter);
++router.use('/admin', adminRouter);
++
++export default router;
+diff --git a/src/server.ts b/src/server.ts
+new file mode 100644
+index 0000000..93847ec
+--- /dev/null
++++ b/src/server.ts
+@@ -0,0 +1,32 @@
++import app from './app';
++import { env } from './utils/env';
++import { maskDatabaseUrl } from './utils/maskDatabaseUrl';
++import { prisma } from './utils/prisma';
++
++async function start() {
++  // Confirmation au démarrage : à quelle base l'API est connectée ?
++  console.log(`[db] DATABASE_URL = ${maskDatabaseUrl(env.DATABASE_URL)}`);
++
++  try {
++    await prisma.$queryRaw`SELECT 1`;
++    console.log('[db] Connexion à la base de données réussie');
++  } catch (error) {
++    console.error('[db] Connexion à la base de données impossible :', error);
++  }
++
++  const server = app.listen(env.PORT, () => {
++    console.log(`API démarrée sur http://localhost:${env.PORT} (health : /health)`);
++  });
++
++  // Arrêt propre (Ctrl+C) : on ferme le serveur puis la connexion Prisma.
++  const shutdown = () => {
++    server.close(async () => {
++      await prisma.$disconnect();
++      process.exit(0);
++    });
++  };
++  process.on('SIGINT', shutdown);
++  process.on('SIGTERM', shutdown);
++}
++
++start();
+diff --git a/src/services/authService.ts b/src/services/authService.ts
+new file mode 100644
+index 0000000..71af662
+--- /dev/null
++++ b/src/services/authService.ts
+@@ -0,0 +1,181 @@
++import bcrypt from 'bcryptjs';
++import { TokenType } from '../generated/prisma/client';
++import { env } from '../utils/env';
++import { prisma } from '../utils/prisma';
++import { badRequest, notFound, unauthorized } from '../utils/AppError';
++import {
++  daysFromNow,
++  generateRandomToken,
++  hashToken,
++  hoursFromNow,
++  signAccessToken,
++} from '../utils/tokens';
++import { sendPasswordResetEmail } from './emailService';
++
++const BCRYPT_ROUNDS = 12;
++const RESET_TOKEN_HOURS = 1;
++
++// Ce qu'on renvoie au client : jamais le hash du mot de passe.
++function publicUser(user: {
++  id: string;
++  email: string;
++  firstName: string;
++  lastName: string;
++  role: string;
++}) {
++  const { id, email, firstName, lastName, role } = user;
++  return { id, email, firstName, lastName, role };
++}
++
++// Crée un access token (JWT court) + un refresh token (aléatoire, stocké hashé).
++async function issueTokens(user: { id: string; role: string }) {
++  const accessToken = signAccessToken({ sub: user.id, role: user.role });
++  const refreshToken = generateRandomToken();
++
++  await prisma.token.create({
++    data: {
++      type: TokenType.REFRESH,
++      tokenHash: hashToken(refreshToken),
++      userId: user.id,
++      expiresAt: daysFromNow(env.JWT_REFRESH_EXPIRES_DAYS),
++    },
++  });
++
++  return { accessToken, refreshToken };
++}
++
++// Retourne un jeton valide (bon type, non utilisé, non expiré) ou null.
++async function findValidToken(rawToken: string, type: TokenType) {
++  const token = await prisma.token.findUnique({
++    where: { tokenHash: hashToken(rawToken) },
++    include: { user: true },
++  });
++  if (!token || token.type !== type || token.usedAt || token.expiresAt < new Date()) return null;
++  return token;
++}
++
++export async function login(email: string, password: string) {
++  const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
++
++  // Même message dans tous les cas d'échec : on ne révèle pas si l'e-mail existe.
++  if (!user || !user.passwordHash || !(await bcrypt.compare(password, user.passwordHash))) {
++    throw unauthorized('E-mail ou mot de passe incorrect');
++  }
++  if (!user.isActive) throw unauthorized('Ce compte est désactivé');
++
++  await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
++  const tokens = await issueTokens(user);
++  return { user: publicUser(user), ...tokens };
++}
++
++// Rotation : chaque refresh token ne sert qu'une fois, on en renvoie un nouveau.
++export async function refresh(rawRefreshToken: string) {
++  const stored = await prisma.token.findUnique({
++    where: { tokenHash: hashToken(rawRefreshToken) },
++    include: { user: true },
++  });
++
++  if (!stored || stored.type !== TokenType.REFRESH) throw unauthorized('Refresh token invalide');
++
++  // Un token déjà utilisé qu'on rejoue = possible vol : on coupe toutes les sessions.
++  if (stored.usedAt) {
++    await prisma.token.updateMany({
++      where: { userId: stored.userId, type: TokenType.REFRESH, usedAt: null },
++      data: { usedAt: new Date() },
++    });
++    throw unauthorized('Refresh token invalide');
++  }
++  if (stored.expiresAt < new Date()) throw unauthorized('Session expirée');
++  if (!stored.user.isActive) throw unauthorized('Ce compte est désactivé');
++
++  await prisma.token.update({ where: { id: stored.id }, data: { usedAt: new Date() } });
++  return issueTokens(stored.user);
++}
++
++export async function logout(rawRefreshToken: string) {
++  await prisma.token.updateMany({
++    where: { tokenHash: hashToken(rawRefreshToken), type: TokenType.REFRESH, usedAt: null },
++    data: { usedAt: new Date() },
++  });
++}
++
++export async function getMe(userId: string) {
++  const user = await prisma.user.findUnique({ where: { id: userId } });
++  if (!user) throw notFound('Utilisateur introuvable');
++  return publicUser(user);
++}
++
++// Réponse identique que l'e-mail existe ou non (côté controller) : pas de fuite d'information.
++export async function forgotPassword(email: string) {
++  const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
++  // Pas de reset pour un compte inexistant, désactivé, ou dont l'invitation n'est pas acceptée.
++  if (!user || !user.isActive || !user.passwordHash) return;
++
++  // On invalide les anciens liens de reset encore actifs.
++  await prisma.token.updateMany({
++    where: { userId: user.id, type: TokenType.PASSWORD_RESET, usedAt: null },
++    data: { usedAt: new Date() },
++  });
++
++  const rawToken = generateRandomToken();
++  await prisma.token.create({
++    data: {
++      type: TokenType.PASSWORD_RESET,
++      tokenHash: hashToken(rawToken),
++      userId: user.id,
++      expiresAt: hoursFromNow(RESET_TOKEN_HOURS),
++    },
++  });
++
++  await sendPasswordResetEmail({ to: user.email, firstName: user.firstName, token: rawToken });
++}
++
++export async function resetPassword(rawToken: string, newPassword: string) {
++  const token = await findValidToken(rawToken, TokenType.PASSWORD_RESET);
++  if (!token) throw badRequest('Lien invalide ou expiré');
++
++  const passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
++
++  // Transaction : tout réussit ou rien ne change.
++  await prisma.$transaction([
++    prisma.user.update({ where: { id: token.userId }, data: { passwordHash } }),
++    prisma.token.update({ where: { id: token.id }, data: { usedAt: new Date() } }),
++    // On déconnecte toutes les sessions existantes.
++    prisma.token.updateMany({
++      where: { userId: token.userId, type: TokenType.REFRESH, usedAt: null },
++      data: { usedAt: new Date() },
++    }),
++  ]);
++}
++
++// L'utilisateur invité choisit son mot de passe grâce au lien reçu par e-mail.
++export async function acceptInvitation(rawToken: string, password: string) {
++  const token = await findValidToken(rawToken, TokenType.INVITATION);
++  if (!token) throw badRequest('Invitation invalide ou expirée');
++  if (!token.user.isActive) throw badRequest('Ce compte est désactivé');
++
++  const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
++
++  await prisma.$transaction([
++    prisma.user.update({ where: { id: token.userId }, data: { passwordHash } }),
++    prisma.token.update({ where: { id: token.id }, data: { usedAt: new Date() } }),
++  ]);
++}
++
++export async function changePassword(userId: string, currentPassword: string, newPassword: string) {
++  const user = await prisma.user.findUnique({ where: { id: userId } });
++  if (!user || !user.passwordHash) throw unauthorized();
++
++  if (!(await bcrypt.compare(currentPassword, user.passwordHash))) {
++    throw badRequest('Mot de passe actuel incorrect');
++  }
++
++  const passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
++  await prisma.$transaction([
++    prisma.user.update({ where: { id: userId }, data: { passwordHash } }),
++    prisma.token.updateMany({
++      where: { userId, type: TokenType.REFRESH, usedAt: null },
++      data: { usedAt: new Date() },
++    }),
++  ]);
++}
+diff --git a/src/services/emailService.ts b/src/services/emailService.ts
+new file mode 100644
+index 0000000..a4f6bfb
+--- /dev/null
++++ b/src/services/emailService.ts
+@@ -0,0 +1,74 @@
++import { Resend } from 'resend';
++import { env } from '../utils/env';
++import { AppError } from '../utils/AppError';
++
++const resend = new Resend(env.RESEND_API_KEY);
++
++// Empêche qu'un prénom du type "<script>" soit interprété comme du HTML dans l'e-mail.
++const escapeHtml = (value: string) =>
++  value
++    .replace(/&/g, '&amp;')
++    .replace(/</g, '&lt;')
++    .replace(/>/g, '&gt;')
++    .replace(/"/g, '&quot;');
++
++// Mise en page commune à tous les e-mails.
++function layout(title: string, content: string, buttonLabel: string, buttonUrl: string) {
++  return `
++  <div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:24px;color:#1f2937">
++    <h2 style="color:#111827">${title}</h2>
++    ${content}
++    <p style="margin:32px 0">
++      <a href="${buttonUrl}"
++         style="background:#2563eb;color:#fff;padding:12px 20px;border-radius:6px;text-decoration:none">
++        ${buttonLabel}
++      </a>
++    </p>
++    <p style="font-size:12px;color:#6b7280">
++      Si le bouton ne fonctionne pas, copie ce lien dans ton navigateur :<br>${buttonUrl}
++    </p>
++  </div>`;
++}
++
++async function send(to: string, subject: string, html: string) {
++  const { error } = await resend.emails.send({ from: env.EMAIL_FROM, to, subject, html });
++  if (error) {
++    console.error('Erreur Resend :', error);
++    throw new AppError(502, "L'envoi de l'e-mail a échoué");
++  }
++}
++
++// E-mail de bienvenue envoyé quand un admin invite un utilisateur.
++export async function sendWelcomeInvitationEmail(params: {
++  to: string;
++  firstName: string;
++  inviterName: string;
++  token: string;
++}) {
++  const url = `${env.FRONTEND_URL}/accept-invitation?token=${params.token}`;
++  const html = layout(
++    `Bienvenue ${escapeHtml(params.firstName)} !`,
++    `<p>${escapeHtml(params.inviterName)} t'a invité à rejoindre la plateforme de support informatique.</p>
++     <p>Clique sur le bouton pour choisir ton mot de passe et activer ton compte. Le lien est valable 48 heures.</p>`,
++    'Activer mon compte',
++    url,
++  );
++  await send(params.to, 'Bienvenue : active ton compte', html);
++}
++
++export async function sendPasswordResetEmail(params: {
++  to: string;
++  firstName: string;
++  token: string;
++}) {
++  const url = `${env.FRONTEND_URL}/reset-password?token=${params.token}`;
++  const html = layout(
++    'Réinitialisation du mot de passe',
++    `<p>Bonjour ${escapeHtml(params.firstName)},</p>
++     <p>Tu as demandé à réinitialiser ton mot de passe. Le lien est valable 1 heure.</p>
++     <p>Si tu n'es pas à l'origine de cette demande, ignore simplement cet e-mail.</p>`,
++    'Choisir un nouveau mot de passe',
++    url,
++  );
++  await send(params.to, 'Réinitialisation de ton mot de passe', html);
++}
+diff --git a/src/services/userService.ts b/src/services/userService.ts
+new file mode 100644
+index 0000000..7aac0aa
+--- /dev/null
++++ b/src/services/userService.ts
+@@ -0,0 +1,130 @@
++import { Role, TokenType } from '../generated/prisma/client';
++import { prisma } from '../utils/prisma';
++import { conflict, forbidden, notFound } from '../utils/AppError';
++import { generateRandomToken, hashToken, hoursFromNow } from '../utils/tokens';
++import { sendWelcomeInvitationEmail } from './emailService';
++
++const INVITATION_HOURS = 48;
++
++// Hiérarchie : qui a le droit de créer / gérer quel rôle.
++// - SUPER_ADMIN : tous les rôles
++// - ADMIN : seulement AGENT et USER
++const MANAGEABLE_ROLES: Record<Role, Role[]> = {
++  SUPER_ADMIN: [Role.SUPER_ADMIN, Role.ADMIN, Role.AGENT, Role.USER],
++  ADMIN: [Role.AGENT, Role.USER],
++  AGENT: [],
++  USER: [],
++};
++
++const canManage = (actorRole: Role, targetRole: Role) =>
++  MANAGEABLE_ROLES[actorRole].includes(targetRole);
++
++interface Actor {
++  id: string;
++  role: Role;
++}
++
++export async function inviteUser(
++  actor: Actor,
++  input: { email: string; firstName: string; lastName: string; role: Role },
++) {
++  if (!canManage(actor.role, input.role)) {
++    throw forbidden(`Tu n'as pas le droit d'inviter le rôle ${input.role}`);
++  }
++
++  const email = input.email.toLowerCase();
++  const existing = await prisma.user.findUnique({ where: { email } });
++
++  // Un compte déjà activé ne peut pas être ré-invité.
++  if (existing?.passwordHash) throw conflict('Un compte actif existe déjà avec cet e-mail');
++
++  // Si l'invitation n'avait pas été acceptée, on met à jour la fiche et on renvoie un nouveau lien.
++  const user = existing
++    ? await prisma.user.update({
++        where: { id: existing.id },
++        data: {
++          firstName: input.firstName,
++          lastName: input.lastName,
++          role: input.role,
++          isActive: true,
++        },
++      })
++    : await prisma.user.create({
++        data: {
++          email,
++          firstName: input.firstName,
++          lastName: input.lastName,
++          role: input.role,
++          invitedById: actor.id,
++        },
++      });
++
++  // On annule les anciennes invitations, puis on en crée une nouvelle.
++  await prisma.token.updateMany({
++    where: { userId: user.id, type: TokenType.INVITATION, usedAt: null },
++    data: { usedAt: new Date() },
++  });
++
++  const rawToken = generateRandomToken();
++  await prisma.token.create({
++    data: {
++      type: TokenType.INVITATION,
++      tokenHash: hashToken(rawToken),
++      userId: user.id,
++      expiresAt: hoursFromNow(INVITATION_HOURS),
++    },
++  });
++
++  const inviter = await prisma.user.findUnique({ where: { id: actor.id } });
++  const inviterName = inviter ? `${inviter.firstName} ${inviter.lastName}` : 'Un administrateur';
++
++  // Si Resend échoue, l'erreur 502 remonte : l'utilisateur existe, l'admin peut relancer l'invitation.
++  await sendWelcomeInvitationEmail({
++    to: user.email,
++    firstName: user.firstName,
++    inviterName,
++    token: rawToken,
++  });
++
++  return {
++    id: user.id,
++    email: user.email,
++    firstName: user.firstName,
++    lastName: user.lastName,
++    role: user.role,
++  };
++}
++
++export async function listUsers() {
++  return prisma.user.findMany({
++    select: {
++      id: true,
++      email: true,
++      firstName: true,
++      lastName: true,
++      role: true,
++      isActive: true,
++      lastLoginAt: true,
++      createdAt: true,
++    },
++    orderBy: { createdAt: 'desc' },
++  });
++}
++
++export async function setUserActive(actor: Actor, targetId: string, isActive: boolean) {
++  if (actor.id === targetId) throw forbidden('Tu ne peux pas modifier ton propre statut');
++
++  const target = await prisma.user.findUnique({ where: { id: targetId } });
++  if (!target) throw notFound('Utilisateur introuvable');
++  if (!canManage(actor.role, target.role)) throw forbidden('Tu ne peux pas gérer ce compte');
++
++  await prisma.user.update({ where: { id: targetId }, data: { isActive } });
++
++  // Désactivation : on coupe aussitôt toutes ses sessions.
++  if (!isActive) {
++    await prisma.token.updateMany({
++      where: { userId: targetId, type: TokenType.REFRESH, usedAt: null },
++      data: { usedAt: new Date() },
++    });
++  }
++}
+diff --git a/src/utils/AppError.ts b/src/utils/AppError.ts
+new file mode 100644
+index 0000000..80585ce
+--- /dev/null
++++ b/src/utils/AppError.ts
+@@ -0,0 +1,16 @@
++// Erreur "attendue" : on choisit le code HTTP et le message affiché au client.
++export class AppError extends Error {
++  constructor(
++    public statusCode: number,
++    message: string,
++  ) {
++    super(message);
++    this.name = 'AppError';
++  }
++}
++
++export const badRequest = (msg = 'Requête invalide') => new AppError(400, msg);
++export const unauthorized = (msg = 'Non authentifié') => new AppError(401, msg);
++export const forbidden = (msg = 'Accès refusé') => new AppError(403, msg);
++export const notFound = (msg = 'Ressource introuvable') => new AppError(404, msg);
++export const conflict = (msg = 'Conflit') => new AppError(409, msg);
+diff --git a/src/utils/asyncHandler.ts b/src/utils/asyncHandler.ts
+new file mode 100644
+index 0000000..973f656
+--- /dev/null
++++ b/src/utils/asyncHandler.ts
+@@ -0,0 +1,9 @@
++import { NextFunction, Request, RequestHandler, Response } from 'express';
++
++// Express 4 n'attrape pas les erreurs des fonctions async.
++// Ce wrapper les envoie au middleware d'erreur via next(err).
++export const asyncHandler =
++  (fn: (req: Request, res: Response, next: NextFunction) => Promise<unknown>): RequestHandler =>
++  (req, res, next) => {
++    fn(req, res, next).catch(next);
++  };
+diff --git a/src/utils/env.ts b/src/utils/env.ts
+new file mode 100644
+index 0000000..8677e52
+--- /dev/null
++++ b/src/utils/env.ts
+@@ -0,0 +1,27 @@
++import 'dotenv/config';
++import { z } from 'zod';
++
++// On valide les variables d'environnement au démarrage :
++// si une variable manque, l'API refuse de démarrer avec un message clair.
++const schema = z.object({
++  PORT: z.coerce.number().default(3000),
++  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
++  FRONTEND_URL: z.string().url().default('http://localhost:5173'),
++  DATABASE_URL: z.string().min(1),
++  JWT_ACCESS_SECRET: z.string().min(16),
++  JWT_REFRESH_SECRET: z.string().min(16),
++  JWT_ACCESS_EXPIRES_IN: z.string().default('15m'),
++  JWT_REFRESH_EXPIRES_DAYS: z.coerce.number().default(7),
++  RESEND_API_KEY: z.string().min(1),
++  EMAIL_FROM: z.string().min(1),
++});
++
++const parsed = schema.safeParse(process.env);
++
++if (!parsed.success) {
++  console.error('Variables d\'environnement invalides :');
++  console.error(parsed.error.flatten().fieldErrors);
++  process.exit(1);
++}
++
++export const env = parsed.data;
+diff --git a/src/utils/maskDatabaseUrl.ts b/src/utils/maskDatabaseUrl.ts
+new file mode 100644
+index 0000000..74a6335
+--- /dev/null
++++ b/src/utils/maskDatabaseUrl.ts
+@@ -0,0 +1,11 @@
++// Affiche l'URL de la base pour confirmer à quelle base on est connecté,
++// mais remplace le mot de passe par **** pour qu'il ne finisse jamais dans les logs.
++export function maskDatabaseUrl(url: string): string {
++  try {
++    const parsed = new URL(url);
++    if (parsed.password) parsed.password = '****';
++    return parsed.toString();
++  } catch {
++    return '(URL de base invalide)';
++  }
++}
+diff --git a/src/utils/prisma.ts b/src/utils/prisma.ts
+new file mode 100644
+index 0000000..15a2489
+--- /dev/null
++++ b/src/utils/prisma.ts
+@@ -0,0 +1,8 @@
++import { PrismaPg } from '@prisma/adapter-pg';
++import { PrismaClient } from '../generated/prisma/client';
++import { env } from './env';
++
++// Prisma 7 se connecte via un "driver adapter" (ici le driver pg).
++const adapter = new PrismaPg({ connectionString: env.DATABASE_URL });
++
++export const prisma = new PrismaClient({ adapter });
+diff --git a/src/utils/schemas.ts b/src/utils/schemas.ts
+new file mode 100644
+index 0000000..a540994
+--- /dev/null
++++ b/src/utils/schemas.ts
+@@ -0,0 +1,45 @@
++import { z } from 'zod';
++
++// Schémas de validation des corps de requête, partagés par les routers.
++
++const email = z.string().trim().toLowerCase().email('E-mail invalide');
++
++// Règle simple : 8 caractères minimum, au moins une lettre et un chiffre.
++const password = z
++  .string()
++  .min(8, 'Au moins 8 caractères')
++  .regex(/[A-Za-z]/, 'Au moins une lettre')
++  .regex(/\d/, 'Au moins un chiffre');
++
++export const loginSchema = z.object({
++  email,
++  password: z.string().min(1, 'Mot de passe requis'),
++});
++
++export const refreshSchema = z.object({ refreshToken: z.string().min(1) });
++
++export const forgotPasswordSchema = z.object({ email });
++
++export const resetPasswordSchema = z.object({
++  token: z.string().min(1),
++  newPassword: password,
++});
++
++export const acceptInvitationSchema = z.object({
++  token: z.string().min(1),
++  password,
++});
++
++export const changePasswordSchema = z.object({
++  currentPassword: z.string().min(1),
++  newPassword: password,
++});
++
++export const inviteUserSchema = z.object({
++  email,
++  firstName: z.string().trim().min(1).max(100),
++  lastName: z.string().trim().min(1).max(100),
++  role: z.enum(['ADMIN', 'AGENT', 'USER', 'SUPER_ADMIN']).default('USER'),
++});
++
++export const setStatusSchema = z.object({ isActive: z.boolean() });
+diff --git a/src/utils/tokens.ts b/src/utils/tokens.ts
+new file mode 100644
+index 0000000..3a02c43
+--- /dev/null
++++ b/src/utils/tokens.ts
+@@ -0,0 +1,31 @@
++import crypto from 'crypto';
++import jwt from 'jsonwebtoken';
++import { env } from './env';
++
++export interface AccessPayload {
++  sub: string; // id de l'utilisateur
++  role: string;
++}
++
++// Jeton aléatoire envoyé par e-mail (invitation, reset) ou utilisé comme refresh.
++export function generateRandomToken(): string {
++  return crypto.randomBytes(32).toString('hex');
++}
++
++// En base on ne garde que le hash : si la base fuit, les jetons restent inutilisables.
++export function hashToken(token: string): string {
++  return crypto.createHash('sha256').update(token).digest('hex');
++}
++
++export function signAccessToken(payload: AccessPayload): string {
++  return jwt.sign(payload, env.JWT_ACCESS_SECRET, {
++    expiresIn: env.JWT_ACCESS_EXPIRES_IN as jwt.SignOptions['expiresIn'],
++  });
++}
++
++export function verifyAccessToken(token: string): AccessPayload {
++  return jwt.verify(token, env.JWT_ACCESS_SECRET) as AccessPayload;
++}
++
++export const hoursFromNow = (h: number) => new Date(Date.now() + h * 60 * 60 * 1000);
++export const daysFromNow = (d: number) => hoursFromNow(d * 24);
+-- 
+2.43.0
+
